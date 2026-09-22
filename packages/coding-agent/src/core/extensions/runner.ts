@@ -9,6 +9,7 @@ import {
 	type Model,
 	type Provider,
 	type ProviderHeaders,
+	ProviderRequestDeniedError,
 } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -359,6 +360,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private requestGovernor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined;
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -409,6 +411,7 @@ export class ExtensionRunner {
 		},
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
+		this.runtime.setRequestGovernor = (governor) => this.setRequestGovernor(governor);
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -694,6 +697,17 @@ export class ExtensionRunner {
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
 		return () => this.errorListeners.delete(listener);
+	}
+
+	/** Register the final-send request governor (at most one; last wins). */
+	setRequestGovernor(
+		governor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined,
+	): void {
+		this.requestGovernor = governor;
+	}
+
+	getRequestGovernor(): ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined {
+		return this.requestGovernor;
 	}
 
 	emitError(error: ExtensionError): void {
@@ -1266,6 +1280,10 @@ export class ExtensionRunner {
 						currentPayload = handlerResult;
 					}
 				} catch (err) {
+					// Terminal denial: a governed refusal must reach the provider
+					// layer as a typed error (no retry, no fallback), never be
+					// logged-and-continued like an ordinary handler bug.
+					if (err instanceof ProviderRequestDeniedError) throw err;
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({

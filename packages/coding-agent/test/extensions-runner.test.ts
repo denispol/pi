@@ -679,6 +679,49 @@ describe("ExtensionRunner", () => {
 			]);
 		});
 
+		it("rethrows governed denial instead of logging-and-continuing", async () => {
+			const extCode = `
+				import { ProviderRequestDeniedError } from "@earendil-works/pi-ai";
+				export default function(pi) {
+					pi.on("before_provider_request", async () => {
+						throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_BUDGET", "exhausted");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "denies.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			await expect(runner.emitBeforeProviderRequest({ input: [] })).rejects.toMatchObject({
+				name: "ProviderRequestDeniedError",
+				code: "ADMISSION_DENIED:E_BUDGET",
+			});
+			expect(errors).toEqual([]);
+		});
+
+		it("still logs-and-continues ordinary before_provider_request errors", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_request", async () => {
+						throw new Error("ordinary handler bug");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "throws.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			const payload = { input: [] };
+			await expect(runner.emitBeforeProviderRequest(payload)).resolves.toBe(payload);
+			expect(errors).toMatchObject([{ event: "before_provider_request", error: "ordinary handler bug" }]);
+		});
+
 		it("accepts valid user_bash operations and result overrides", async () => {
 			const extCode = `
 				export default function(pi) {

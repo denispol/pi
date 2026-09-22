@@ -80,6 +80,13 @@ export interface ModelsRefreshResult {
 export interface ModelsRequestTransforms {
 	/** Transform fully assembled model/auth/request headers before provider dispatch. */
 	transformHeaders?: (headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>;
+	/**
+	 * Final-send governor. Providers that support it (currently
+	 * openai-codex-responses) invoke it synchronously with the exact
+	 * serialized application payload immediately before transport send, on
+	 * every attempt. Throw `ProviderRequestDeniedError` to deny terminally.
+	 */
+	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
 }
 
 export type ModelsApiStreamOptions<TApi extends Api> = ApiStreamOptions<TApi> & ModelsRequestTransforms;
