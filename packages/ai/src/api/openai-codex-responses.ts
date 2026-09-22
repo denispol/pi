@@ -110,6 +110,19 @@ export class ProviderRequestDeniedError extends Error {
 	}
 }
 
+/**
+ * Duck-typed denial guard. Extensions run in a sandbox where
+ * `@earendil-works/pi-ai` is unresolvable, so they throw a same-shaped
+ * error (`name === "ProviderRequestDeniedError"` + string `code`); this
+ * guard accepts both the class and the shape. Never match message text.
+ */
+export function isRequestDeniedError(error: unknown): boolean {
+	if (error instanceof ProviderRequestDeniedError) return true;
+	if (typeof error !== "object" || error === null) return false;
+	const record = error as Record<string, unknown>;
+	return record["name"] === "ProviderRequestDeniedError" && typeof record["code"] === "string";
+}
+
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
 
 interface RequestBody {
@@ -728,11 +741,7 @@ class CodexProtocolError extends Error {
 }
 
 function isCodexNonTransportError(error: unknown): boolean {
-	return (
-		error instanceof CodexApiError ||
-		error instanceof CodexProtocolError ||
-		error instanceof ProviderRequestDeniedError
-	);
+	return error instanceof CodexApiError || error instanceof CodexProtocolError || isRequestDeniedError(error);
 }
 
 function isWebSocketConnectionLimitReachedError(error: unknown): boolean {

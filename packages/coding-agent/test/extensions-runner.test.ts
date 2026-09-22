@@ -702,6 +702,27 @@ describe("ExtensionRunner", () => {
 			expect(errors).toEqual([]);
 		});
 
+		it("rethrows sandbox-shaped denial without the pi-ai import", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_request", async () => {
+						const err = new Error("Provider request denied: ADMISSION_DENIED:E_HISTORY:replay-refused");
+						err.name = "ProviderRequestDeniedError";
+						(err).code = "ADMISSION_DENIED:E_HISTORY";
+						throw err;
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "denies-shape.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			await expect(runner.emitBeforeProviderRequest({ input: [] })).rejects.toMatchObject({
+				name: "ProviderRequestDeniedError",
+				code: "ADMISSION_DENIED:E_HISTORY",
+			});
+		});
+
 		it("still logs-and-continues ordinary before_provider_request errors", async () => {
 			const extCode = `
 				export default function(pi) {
