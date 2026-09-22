@@ -560,6 +560,8 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
+		// streamSimple rebuilds options: explicitly carry the final-send governor.
+		governRequest: (options as OpenAICodexResponsesOptions | undefined)?.governRequest,
 	} satisfies OpenAICodexResponsesOptions);
 };
 
