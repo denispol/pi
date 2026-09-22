@@ -96,7 +96,70 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	 * full body and verify delta linkage against it. SSE sends carry the
 	 * full body with no `fullBody` envelope entry.
 	 */
-	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
+	governRequest?: (finalBody: unknown, envelope: GovernEnvelope) => void;
+	/**
+	 * Dispatch observer (optional). Called once per inference-bearing send
+	 * that was performed or possibly performed, with a correlation fact.
+	 * It is observability, not authorization: a second fact for one stream
+	 * invocation means a second send happened and must be accounted for.
+	 * Pre-send refusals (governor denial, proven pre-send connection
+	 * failure, pre-send abort) record no fact.
+	 */
+	onDispatch?: (fact: DispatchFact) => void;
+}
+
+/**
+ * Final-send governor envelope (C2 dispatch contract).
+ *
+ * - `transport`/`fullBody`: which bytes were governed (delta vs full).
+ * - `model`/`accountId`: trusted selected-config identity, so the
+ *   governor binds authority to the chosen route instead of learning it
+ *   from the presented body (R-FIRST-SEND).
+ * - `priorSends`: inference-bearing sends already performed in this stream
+ *   invocation. Nonzero means a recovery resend, which needs a fresh
+ *   dispatch permission — never silent reuse of the first allowance.
+ */
+export interface GovernEnvelope {
+	transport: "websocket" | "sse";
+	fullBody?: unknown;
+	model?: string;
+	accountId?: string;
+	priorSends?: number;
+}
+
+/** Correlation fact for one performed-or-possible inference-bearing send. */
+export interface DispatchFact {
+	/** 1-based send ordinal within this stream invocation. */
+	attemptSeq: number;
+	transport: "websocket" | "sse";
+	/** cyrb53 hex of the exact sent bytes; correlation-only, not security. */
+	payloadHash: string;
+	byteLength: number;
+}
+
+function hashDispatchBytes(data: string | Uint8Array): string {
+	let h1 = 0xdeadbeef;
+	let h2 = 0x41c6ce57;
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+	for (let i = 0; i < bytes.length; i++) {
+		const ch = bytes[i];
+		h1 = Math.imul(h1 ^ ch, 2654435761);
+		h2 = Math.imul(h2 ^ ch, 1597334677);
+	}
+	h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+	h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+	return `${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Provably pre-send transport failures: name resolution and connection
+ * refusal happen before any byte can transfer, so a retry is a first send,
+ * not a second. Every other throw is ambiguous (bytes may have been sent)
+ * and must stop uncertain instead of retrying.
+ */
+function isProvenPreSendThrow(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|connection refused|getaddrinfo|failed to resolve/i.test(message);
 }
 
 /**
@@ -169,16 +232,6 @@ function isTerminalRateLimitError(errorText: string): boolean {
 	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
 		errorText,
 	);
-}
-
-function isRetryableError(status: number, errorText: string): boolean {
-	if (status === 429 && isTerminalRateLimitError(errorText)) {
-		return false;
-	}
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
-		return true;
-	}
-	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
 }
 
 function getRetryAfterDelayMs(headers: Headers): number | undefined {
@@ -343,6 +396,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				recordWebSocketSseFallback(cacheSessionId);
 			}
 
+			// C2 dispatch contract: sends performed anywhere in this stream
+			// invocation (WS attempts and a later SSE fallback share it).
+			// After a possible inference-bearing send there is no automatic
+			// second send: retries and the SSE fallback run only while no
+			// send has been performed. Anything later stops uncertain.
+			const dispatchState = { sends: 0 };
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
@@ -370,6 +429,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							accountId,
 							grammarToolInputProperties,
 							options,
+							dispatchState,
 						);
 
 						if (options?.signal?.aborted) {
@@ -385,17 +445,23 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
+						// A performed send ends automatic recovery: the server may
+						// have executed inference, so neither retry mode may run.
+						// (Server error codes like previous_response_not_found
+						// themselves prove the send executed.) The error propagates
+						// as the terminal uncertain outcome.
+						const postSend = dispatchState.sends > 0;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
+						if (!aborted && !postSend && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
 							retriedMissingWebSocketContinuation = true;
 							continue;
 						}
-						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
+						if (!aborted && !postSend && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
 							retriedWebSocketConnectionLimit = true;
 							continue;
 						}
-						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
+						if (postSend || aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
 						appendAssistantMessageDiagnostic(
@@ -429,7 +495,29 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 
 			// Final-send governor for the fallback path. Denial throws terminally:
 			// the fetch below never runs and the HTTP retry loop never starts.
-			options?.governRequest?.(body, { transport: "sse" });
+			// priorSends carries WS sends when this SSE path is a post-WS fallback:
+			// nonzero means a recovery resend needing fresh permission.
+			options?.governRequest?.(body, {
+				transport: "sse",
+				model: body.model,
+				accountId,
+				priorSends: dispatchState.sends,
+			});
+			// Recheck cancellation after governance (same reason as the WS path).
+			if (options?.signal?.aborted) {
+				throw new Error("Request was aborted");
+			}
+			const noteSseDispatch = () => {
+				dispatchState.sends += 1;
+				const bytes =
+					typeof sseBody === "string" ? new TextEncoder().encode(sseBody).byteLength : sseBody.byteLength;
+				options?.onDispatch?.({
+					attemptSeq: dispatchState.sends,
+					transport: "sse",
+					payloadHash: hashDispatchBytes(sseBody),
+					byteLength: bytes,
+				});
+			};
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
@@ -452,7 +540,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							body: sseBody,
 							signal: combinedSignal.signal,
 						});
+						// The fetch returned: the send was performed.
+						noteSseDispatch();
 					} catch (error) {
+						// A throw may still have executed server-side; record the
+						// possible send unless the failure is provably pre-send.
+						if (!isProvenPreSendThrow(error)) {
+							noteSseDispatch();
+						}
 						if (headerTimeoutSignal?.aborted && !options?.signal?.aborted) {
 							throw new Error(`Codex SSE response headers timed out after ${httpTimeoutMs}ms`);
 						}
@@ -470,7 +565,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					}
 
 					const errorText = await response.text();
-					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
+					// Only a definitive non-execution signal (non-terminal 429:
+					// the server refused before running inference) retries
+					// automatically. Any other error status after a performed
+					// send is ambiguous delivery: stop uncertain, no second send.
+					if (attempt < maxRetries && response.status === 429 && !isTerminalRateLimitError(errorText)) {
 						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
 						const delayMs =
 							retryAfterDelayMs === undefined
@@ -495,9 +594,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
+					// Only provably pre-send connection failures retry: anything
+					// else may have executed server-side, so it stops uncertain.
 					if (
 						attempt < maxRetries &&
+						isProvenPreSendThrow(lastError) &&
 						!(lastError instanceof RetryDelayExceededError) &&
 						!lastError.message.includes("usage limit")
 					) {
@@ -566,8 +667,10 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
-		// streamSimple rebuilds options: explicitly carry the final-send governor.
+		// streamSimple rebuilds options: explicitly carry the final-send governor
+		// and the dispatch observer.
 		governRequest: (options as OpenAICodexResponsesOptions | undefined)?.governRequest,
+		onDispatch: (options as OpenAICodexResponsesOptions | undefined)?.onDispatch,
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -1529,7 +1632,18 @@ async function processWebSocketStream(
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
+	dispatchState: { sends: number } = { sends: 0 },
 ): Promise<void> {
+	const noteDispatch = (payload: string | Uint8Array) => {
+		dispatchState.sends += 1;
+		const bytes = typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
+		options?.onDispatch?.({
+			attemptSeq: dispatchState.sends,
+			transport: "websocket",
+			payloadHash: hashDispatchBytes(payload),
+			byteLength: bytes,
+		});
+	};
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1548,7 +1662,18 @@ async function processWebSocketStream(
 	// Final-send governor sees the exact post-delta payload plus the full
 	// pre-delta body for content authorization and delta-linkage checks.
 	// Denial throws terminally (non-transport): socket.send never runs.
-	options?.governRequest?.(requestBody, { transport: "websocket", fullBody: fullBody });
+	options?.governRequest?.(requestBody, {
+		transport: "websocket",
+		fullBody: fullBody,
+		model: fullBody.model,
+		accountId,
+		priorSends: dispatchState.sends,
+	});
+	// Recheck cancellation after governance: an abort that landed while the
+	// governor ran must not turn an allowance into a send.
+	if (options?.signal?.aborted) {
+		throw new Error("Request was aborted");
+	}
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1568,7 +1693,9 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const frame = JSON.stringify({ type: "response.create", ...requestBody });
+		socket.send(frame);
+		noteDispatch(frame);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), output),
