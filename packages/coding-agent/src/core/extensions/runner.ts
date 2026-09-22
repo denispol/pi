@@ -410,6 +410,10 @@ export class ExtensionRunner {
 			unregisterProvider?: (name: string) => void;
 		},
 	): void {
+		// Bind load-time governor registrations (last extension wins).
+		for (const ext of this.extensions) {
+			if (ext.requestGovernor) this.requestGovernor = ext.requestGovernor;
+		}
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.setRequestGovernor = (governor) => this.setRequestGovernor(governor);
 		this.runtime.sendMessage = actions.sendMessage;

@@ -1917,6 +1917,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Final-send request governor (last registration wins at bind). */
+	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
 }
 
 /** Result of loading extensions. */

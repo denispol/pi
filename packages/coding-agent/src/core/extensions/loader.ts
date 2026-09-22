@@ -300,7 +300,12 @@ function createExtensionAPI(
 			if (typeof governor !== "function") {
 				throw new Error(`Request governor registered by extension "${extension.path}" must be a function.`);
 			}
-			applyRuntimeChange(() => runtime.setRequestGovernor?.(governor));
+			// Stored on the extension record (like commands): bound by the runner
+			// at initialize, so load-time registration cannot be silently dropped.
+			applyRuntimeChange(() => {
+				extension.requestGovernor = governor;
+				runtime.setRequestGovernor?.(governor);
+			});
 		},
 
 		registerShortcut(
