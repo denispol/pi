@@ -6,10 +6,10 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
 	type ImageContent,
+	isRequestDeniedError,
 	type Model,
 	type Provider,
 	type ProviderHeaders,
-	ProviderRequestDeniedError,
 } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -1283,7 +1283,7 @@ export class ExtensionRunner {
 					// Terminal denial: a governed refusal must reach the provider
 					// layer as a typed error (no retry, no fallback), never be
 					// logged-and-continued like an ordinary handler bug.
-					if (err instanceof ProviderRequestDeniedError) throw err;
+					if (isRequestDeniedError(err)) throw err;
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
