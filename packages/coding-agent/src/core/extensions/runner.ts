@@ -360,7 +360,9 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
-	private requestGovernor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined;
+	private requestGovernor:
+		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
+		| undefined;
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -705,12 +707,16 @@ export class ExtensionRunner {
 
 	/** Register the final-send request governor (at most one; last wins). */
 	setRequestGovernor(
-		governor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined,
+		governor:
+			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
+			| undefined,
 	): void {
 		this.requestGovernor = governor;
 	}
 
-	getRequestGovernor(): ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined {
+	getRequestGovernor():
+		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
+		| undefined {
 		return this.requestGovernor;
 	}
 

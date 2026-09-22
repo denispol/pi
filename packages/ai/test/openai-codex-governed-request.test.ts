@@ -66,6 +66,14 @@ class MockWebSocket {
 	}
 	send(data: string): void {
 		MockWebSocket.sent.push(JSON.parse(data));
+		queueMicrotask(() => {
+			this.dispatch("message", {
+				data: JSON.stringify({
+					type: "response.completed",
+					response: { status: "completed", end_turn: true },
+				}),
+			});
+		});
 	}
 	close(): void {}
 	private dispatch(type: string, event: unknown): void {
@@ -120,6 +128,31 @@ describe("governed request denial", () => {
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(seen).toEqual([["object", { transport: "sse" }]]);
+	});
+
+	it("WS: allowance carries the full pre-delta body in the envelope", async () => {
+		MockWebSocket.sent = [];
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		// Make send() complete a minimal response so the stream finishes.
+		const seen: Array<{ transport: unknown; fullLen: number; sentLen: number }> = [];
+		(MockWebSocket as unknown as { sent: unknown[] }).sent = [];
+		await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken(),
+				transport: "websocket",
+				fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+				governRequest: (body, envelope) => {
+					seen.push({
+						transport: (envelope as { transport: string }).transport,
+						fullLen: ((envelope as { fullBody?: { input?: unknown[] } }).fullBody?.input ?? []).length,
+						sentLen: ((body as { input?: unknown[] }).input ?? []).length,
+					});
+				},
+			}),
+		).catch(() => []);
+		expect(seen.length).toBeGreaterThanOrEqual(1);
+		expect(seen[0].transport).toBe("websocket");
+		expect(seen[0].fullLen).toBeGreaterThanOrEqual(seen[0].sentLen);
 	});
 
 	it("WS: denial runs zero socket.send and terminates without fallback send", async () => {
