@@ -127,7 +127,9 @@ describe("governed request denial", () => {
 			}),
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(seen).toEqual([["object", { transport: "sse" }]]);
+		expect(seen).toEqual([
+			["object", { transport: "sse", model: "gpt-5.1-codex", accountId: "acc_test", priorSends: 0 }],
+		]);
 	});
 
 	it("WS: allowance carries the full pre-delta body in the envelope", async () => {
@@ -153,6 +155,207 @@ describe("governed request denial", () => {
 		expect(seen.length).toBeGreaterThanOrEqual(1);
 		expect(seen[0].transport).toBe("websocket");
 		expect(seen[0].fullLen).toBeGreaterThanOrEqual(seen[0].sentLen);
+	});
+
+	// C2 dispatch contract (Package N): after a possible inference-bearing
+	// send there is no automatic second send. Repeated validation without a
+	// send stays harmless; recovery resends need a fresh dispatch permission
+	// (a new caller preparation, i.e. a new generation) — never silent reuse.
+	// Loss-path socket: records the send, then either closes quietly (server
+	// never answered) or answers with previous_response_not_found (the send
+	// demonstrably executed server-side). Standalone (no private access).
+	class LossyWebSocket {
+		static mode: "close-quiet" | "previous-not-found" = "close-quiet";
+		private listeners = new Map<string, Set<(event: unknown) => void>>();
+		constructor() {
+			queueMicrotask(() => this.emit("open", {}));
+		}
+		addEventListener(type: string, listener: (event: unknown) => void): void {
+			let set = this.listeners.get(type);
+			if (!set) {
+				set = new Set();
+				this.listeners.set(type, set);
+			}
+			set.add(listener);
+		}
+		removeEventListener(type: string, listener: (event: unknown) => void): void {
+			this.listeners.get(type)?.delete(listener);
+		}
+		send(data: string): void {
+			MockWebSocket.sent.push(JSON.parse(data));
+			queueMicrotask(() => {
+				if (LossyWebSocket.mode === "previous-not-found") {
+					this.emit("message", {
+						data: JSON.stringify({ type: "error", code: "previous_response_not_found" }),
+					});
+				} else {
+					this.emit("close", { code: 1006 });
+				}
+			});
+		}
+		close(): void {}
+		private emit(type: string, event: unknown): void {
+			for (const listener of this.listeners.get(type) ?? []) listener(event);
+		}
+	}
+
+	describe("single-send cardinality", () => {
+		it("WS: post-send loss with no response stops uncertain (no SSE second send)", async () => {
+			MockWebSocket.sent = [];
+			LossyWebSocket.mode = "close-quiet";
+			vi.stubGlobal("WebSocket", LossyWebSocket);
+			const fetchMock = vi.fn(async () => new Response("second-send-must-not-happen", { status: 500 }));
+			const facts: unknown[] = [];
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "websocket",
+					fetch: fetchMock,
+					governRequest: () => {},
+					onDispatch: (fact) => facts.push(fact),
+				}),
+			);
+			expect(MockWebSocket.sent.length).toBe(1);
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(facts.length).toBe(1);
+			expect((facts[0] as { transport?: string }).transport).toBe("websocket");
+			const errors = events.filter((e) => (e as { type?: string }).type === "error");
+			expect(errors.length).toBe(1);
+		});
+
+		it("WS: previous_response_not_found proves the send and never auto-resends", async () => {
+			MockWebSocket.sent = [];
+			LossyWebSocket.mode = "previous-not-found";
+			vi.stubGlobal("WebSocket", LossyWebSocket);
+			const fetchMock = vi.fn(async () => new Response("second-send-must-not-happen", { status: 500 }));
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "websocket",
+					fetch: fetchMock,
+					governRequest: () => {},
+				}),
+			);
+			expect(MockWebSocket.sent.length).toBe(1);
+			expect(fetchMock).not.toHaveBeenCalled();
+			const errors = events.filter((e) => (e as { type?: string }).type === "error");
+			expect(errors.length).toBe(1);
+		});
+
+		it("SSE: ambiguous 500 stops after one send (no automatic retry)", async () => {
+			const fetchMock = vi.fn(async () => new Response("boom", { status: 500 }));
+			const facts: unknown[] = [];
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					maxRetries: 3,
+					fetch: fetchMock,
+					governRequest: () => {},
+					onDispatch: (fact) => facts.push(fact),
+				}),
+			);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(facts.length).toBe(1);
+			const errors = events.filter((e) => (e as { type?: string }).type === "error");
+			expect(errors.length).toBe(1);
+		});
+
+		it("SSE: definitive 429 still retries, with one dispatch fact per send", async () => {
+			const fetchMock = vi
+				.fn()
+				.mockResolvedValueOnce(new Response("slow", { status: 429 }))
+				.mockResolvedValueOnce(
+					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+				);
+			const facts: Array<{ attemptSeq?: number; transport?: string }> = [];
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					maxRetries: 3,
+					fetch: fetchMock,
+					governRequest: () => {},
+					onDispatch: (fact) => facts.push(fact),
+				}),
+			);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(facts.map((f) => f.attemptSeq)).toEqual([1, 2]);
+			const done = events.filter((e) => (e as { type?: string }).type === "done");
+			expect(done.length).toBe(1);
+		});
+
+		it("WS: pre-send abort sends nothing", async () => {
+			MockWebSocket.sent = [];
+			vi.stubGlobal("WebSocket", MockWebSocket);
+			const controller = new AbortController();
+			controller.abort();
+			const governed: unknown[] = [];
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "websocket",
+					fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+					signal: controller.signal,
+					governRequest: () => {
+						governed.push(true);
+					},
+				}),
+			);
+			expect(MockWebSocket.sent).toEqual([]);
+			const errors = events.filter((e) => (e as { type?: string }).type === "error");
+			expect(errors.length).toBe(1);
+		});
+
+		it("governor envelope binds trusted route identity with zero prior sends", async () => {
+			MockWebSocket.sent = [];
+			vi.stubGlobal("WebSocket", MockWebSocket);
+			const seen: unknown[] = [];
+			await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "websocket",
+					fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+					governRequest: (_body, envelope) => {
+						seen.push(envelope);
+					},
+				}),
+			);
+			expect(seen.length).toBeGreaterThanOrEqual(1);
+			const first = seen[0] as Record<string, unknown>;
+			expect(first["transport"]).toBe("websocket");
+			expect(first["model"]).toBe("gpt-5.1-codex");
+			expect(first["accountId"]).toBe("acc_test");
+			expect(first["priorSends"]).toBe(0);
+		});
+
+		it("dispatch facts are deterministic per identical bytes", async () => {
+			const runOnce = async () => {
+				MockWebSocket.sent = [];
+				vi.stubGlobal("WebSocket", MockWebSocket);
+				const facts: Array<{ payloadHash?: string; byteLength?: number }> = [];
+				await drain(
+					streamOpenAICodexResponses(MODEL, testContext(), {
+						apiKey: mockToken(),
+						transport: "websocket",
+						fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+						governRequest: () => {},
+						onDispatch: (fact) => facts.push(fact),
+					}),
+				);
+				return facts;
+			};
+			const first = await runOnce();
+			const second = await runOnce();
+			expect(first.length).toBe(1);
+			expect(second.length).toBe(1);
+			expect(first[0].payloadHash).toMatch(/^[0-9a-f]{16}$/);
+			expect(first[0].payloadHash).toBe(second[0].payloadHash);
+			expect(first[0].byteLength).toBeGreaterThan(0);
+		});
 	});
 
 	it("WS: denial runs zero socket.send and terminates without fallback send", async () => {
