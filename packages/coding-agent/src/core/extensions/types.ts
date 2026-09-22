@@ -1434,6 +1434,16 @@ export interface ExtensionAPI {
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
+	/**
+	 * Register the final-send request governor (at most one; last wins).
+	 * The governor runs synchronously at the native send boundary on every
+	 * attempt; throw `ProviderRequestDeniedError` (from `@earendil-works/pi-ai`)
+	 * to deny terminally. Denial inside `before_provider_request` throws the
+	 * same error class and is rethrown by the runner instead of
+	 * logged-and-continued.
+	 */
+	registerRequestGovernor(governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void): void;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -1822,6 +1832,10 @@ export interface ExtensionRuntimeState {
  * Provided to runner.initialize(), copied into the shared runtime.
  */
 export interface ExtensionActions {
+	/** Bound by the runner at initialize; absent pre-bind. */
+	setRequestGovernor?: (
+		governor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined,
+	) => void;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;

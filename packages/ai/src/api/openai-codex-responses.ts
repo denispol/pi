@@ -82,6 +82,32 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
 	toolChoice?: "auto" | "none" | "required";
+	/**
+	 * Final-send governor (optional). Invoked synchronously with the exact
+	 * serialized application payload immediately before WS `socket.send()`
+	 * and before the SSE fetch, on every attempt. Throw
+	 * {@link ProviderRequestDeniedError} to terminally deny the attempt:
+	 * denial is classified non-transport, so it never enters WS retry or
+	 * SSE fallback. Absent governor = ungoverned send (no behavior change).
+	 */
+	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
+}
+
+/**
+ * Terminal provider-request denial. A governor (or an extension, via the
+ * rethrowing `before_provider_request` runner) throws this to refuse an
+ * attempt. It is classified non-transport: no retry, no SSE fallback, no
+ * connection-limit requeue. Stable `code` values are chosen by the thrower
+ * (e.g. `ADMISSION_DENIED:<code>`); never match on message text.
+ */
+export class ProviderRequestDeniedError extends Error {
+	readonly code: string;
+
+	constructor(code: string, detail?: string) {
+		super(`Provider request denied: ${code}${detail ? `: ${detail}` : ""}`);
+		this.name = "ProviderRequestDeniedError";
+		this.code = code;
+	}
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
@@ -381,6 +407,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				sseHeaders.set("content-encoding", "zstd");
 			}
 			const sseBody: Uint8Array | string = compressedBody ?? bodyJson;
+
+			// Final-send governor for the fallback path. Denial throws terminally:
+			// the fetch below never runs and the HTTP retry loop never starts.
+			options?.governRequest?.(body, { transport: "sse" });
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
@@ -698,7 +728,11 @@ class CodexProtocolError extends Error {
 }
 
 function isCodexNonTransportError(error: unknown): boolean {
-	return error instanceof CodexApiError || error instanceof CodexProtocolError;
+	return (
+		error instanceof CodexApiError ||
+		error instanceof CodexProtocolError ||
+		error instanceof ProviderRequestDeniedError
+	);
 }
 
 function isWebSocketConnectionLimitReachedError(error: unknown): boolean {
@@ -1494,6 +1528,9 @@ async function processWebSocketStream(
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	// Final-send governor sees the exact post-delta payload. Denial throws
+	// terminally (non-transport): the socket.send below never runs.
+	options?.governRequest?.(requestBody, { transport: "websocket" });
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;

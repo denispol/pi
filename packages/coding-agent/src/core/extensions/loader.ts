@@ -293,6 +293,16 @@ function createExtensionAPI(
 			});
 		},
 
+		registerRequestGovernor(
+			governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void,
+		): void {
+			assertActive();
+			if (typeof governor !== "function") {
+				throw new Error(`Request governor registered by extension "${extension.path}" must be a function.`);
+			}
+			applyRuntimeChange(() => runtime.setRequestGovernor?.(governor));
+		},
+
 		registerShortcut(
 			shortcut: KeyId,
 			options: {
