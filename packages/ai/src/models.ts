@@ -86,7 +86,7 @@ export interface ModelsRequestTransforms {
 	 * serialized application payload immediately before transport send, on
 	 * every attempt. Throw `ProviderRequestDeniedError` to deny terminally.
 	 */
-	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
+	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
 }
 
 export type ModelsApiStreamOptions<TApi extends Api> = ApiStreamOptions<TApi> & ModelsRequestTransforms;

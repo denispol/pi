@@ -1442,7 +1442,9 @@ export interface ExtensionAPI {
 	 * same error class and is rethrown by the runner instead of
 	 * logged-and-continued.
 	 */
-	registerRequestGovernor(governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void): void;
+	registerRequestGovernor(
+		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void,
+	): void;
 
 	/** Register a keyboard shortcut. */
 	registerShortcut(
@@ -1834,7 +1836,9 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	/** Bound by the runner at initialize; absent pre-bind. */
 	setRequestGovernor?: (
-		governor: ((finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void) | undefined,
+		governor:
+			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
+			| undefined,
 	) => void;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
@@ -1918,7 +1922,7 @@ export interface Extension {
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Final-send request governor (last registration wins at bind). */
-	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
+	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
 }
 
 /** Result of loading extensions. */

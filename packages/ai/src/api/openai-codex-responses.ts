@@ -89,8 +89,14 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	 * {@link ProviderRequestDeniedError} to terminally deny the attempt:
 	 * denial is classified non-transport, so it never enters WS retry or
 	 * SSE fallback. Absent governor = ungoverned send (no behavior change).
+	 *
+	 * On cached WebSocket continuation the sent body carries only the delta
+	 * input; `envelope.fullBody` then holds the complete pre-delta request
+	 * the delta was derived from, so governors authorize content against the
+	 * full body and verify delta linkage against it. SSE sends carry the
+	 * full body with no `fullBody` envelope entry.
 	 */
-	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse" }) => void;
+	governRequest?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
 }
 
 /**
@@ -1539,9 +1545,10 @@ async function processWebSocketStream(
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
-	// Final-send governor sees the exact post-delta payload. Denial throws
-	// terminally (non-transport): the socket.send below never runs.
-	options?.governRequest?.(requestBody, { transport: "websocket" });
+	// Final-send governor sees the exact post-delta payload plus the full
+	// pre-delta body for content authorization and delta-linkage checks.
+	// Denial throws terminally (non-transport): socket.send never runs.
+	options?.governRequest?.(requestBody, { transport: "websocket", fullBody: fullBody });
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
