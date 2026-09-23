@@ -294,7 +294,7 @@ function createExtensionAPI(
 		},
 
 		registerRequestGovernor(
-			governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void,
+			governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void,
 		): void {
 			assertActive();
 			if (typeof governor !== "function") {
