@@ -541,11 +541,17 @@ describe("governed request denial", () => {
 			expect(hashDispatchBytes("thinking-adjuster-b1")).toBe("7f57b39bd8a6636d");
 		});
 
-		it("dispatch facts are deterministic per identical bytes", async () => {
+		it("dispatch-hash v1 fixtures (UTF-8 lanes, empty/Unicode/JSON)", () => {
+			expect(hashDispatchBytes("")).toBe("488bdcb81aee8d83");
+			expect(hashDispatchBytes("héllo→世界")).toBe("50ec19137e5f54ef");
+			expect(hashDispatchBytes('{"a":1}')).toBe("de3034b77cc1d846");
+		});
+
+		it("dispatch facts are deterministic per identical bytes and carry v1", async () => {
 			const runOnce = async () => {
 				MockWebSocket.sent = [];
 				vi.stubGlobal("WebSocket", MockWebSocket);
-				const facts: Array<{ payloadHash?: string; byteLength?: number }> = [];
+				const facts: Array<{ v?: number; payloadHash?: string; byteLength?: number }> = [];
 				await drain(
 					streamOpenAICodexResponses(MODEL, testContext(), {
 						apiKey: mockToken(),
@@ -564,6 +570,8 @@ describe("governed request denial", () => {
 			expect(first[0].payloadHash).toMatch(/^[0-9a-f]{16}$/);
 			expect(first[0].payloadHash).toBe(second[0].payloadHash);
 			expect(first[0].byteLength).toBeGreaterThan(0);
+			expect(first[0].v).toBe(1);
+			expect(second[0].v).toBe(1);
 		});
 	});
 

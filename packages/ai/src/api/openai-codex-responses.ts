@@ -137,6 +137,8 @@ export interface GovernEnvelope {
 
 /** Correlation fact for one performed-or-possible inference-bearing send. */
 export interface DispatchFact {
+	/** Event representation version (B2-A1 v1). Consumers refuse unknown versions. */
+	v: 1;
 	/** 1-based send ordinal within this stream invocation. */
 	attemptSeq: number;
 	transport: "websocket" | "sse";
@@ -187,9 +189,13 @@ function recordSessionDispatch(sessionId: string | undefined, fact: DispatchFact
 }
 
 /**
- * cyrb53 of the exact bytes. Exported so evidence consumers (which cannot
- * import this module, e.g. plain-JS extensions) can port it and cross-check
- * against the fixed vector in the test below.
+ * B2-A1 v1 dispatch-bytes hash (NOT bare "cyrb53"). Versioned contract:
+ * input is UTF-8 bytes (not UTF-16 code units), two 32-bit cyrb53 lanes,
+ * lowercase hex, lane order h2h1 (16 chars). The shared vector plus the
+ * empty/Unicode/JSON fixtures in the test pin this exact representation;
+ * any change needs a new version, never a silent reinterpretation.
+ * Exported so evidence consumers (which cannot import this module, e.g.
+ * plain-JS extensions) can port it and cross-check the fixtures.
  */
 export function hashDispatchBytes(data: string | Uint8Array): string {
 	let h1 = 0xdeadbeef;
@@ -530,6 +536,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				const bytes =
 					typeof sseBody === "string" ? new TextEncoder().encode(sseBody).byteLength : sseBody.byteLength;
 				const fact: DispatchFact = {
+					v: 1,
 					attemptSeq: dispatchState.sends,
 					transport: "sse",
 					payloadHash: hashDispatchBytes(sseBody),
@@ -1661,6 +1668,7 @@ async function processWebSocketStream(
 		dispatchState.sends += 1;
 		const bytes = typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
 		const fact: DispatchFact = {
+			v: 1,
 			attemptSeq: dispatchState.sends,
 			transport: "websocket",
 			payloadHash: hashDispatchBytes(payload),
