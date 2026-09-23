@@ -1,6 +1,21 @@
 // Governed-request final-send enforcement (fork: feat/governed-request-denial).
 // Denial must be terminal: zero transport sends, no retry, no SSE fallback.
 // Run from packages/ai: npx vitest --run test/openai-codex-governed-request.test.ts
+//
+// Residual map (C2 acceptance):
+// - Single-use dispatch: cardinality suite below (loss, previous-not-found,
+//   429-as-send, ambiguous-500, pre-send abort). All are local receiver/fake
+//   tests through the real stream() path; no live inference.
+// - R-DELTA-CUT: exact-cut continuation test below drives two real streams
+//   sharing one session (response.created -> continuation -> delta send).
+// - R-RESPID: previous_response_not_found is terminal without resend; the
+//   delta test links the cut to the actual preceding response id.
+// - R-FIRST-SEND: envelope identity (model/accountId/priorSends) is emitted
+//   and tested, but comparison against the selected authority stays
+//   caller-side via the hook payload; accountId has no caller-side expected
+//   value (capability record owns it in Package C).
+// - Terminal-outcome correlation (completed vs failed/incomplete/late) is
+//   the N/B integration slice, not this file.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderRequestDeniedError, stream as streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
@@ -261,16 +276,12 @@ describe("governed request denial", () => {
 			expect(errors.length).toBe(1);
 		});
 
-		it("SSE: definitive 429 still retries, with one dispatch fact per send", async () => {
-			const fetchMock = vi
-				.fn()
-				.mockResolvedValueOnce(new Response("slow", { status: 429 }))
-				.mockResolvedValueOnce(
-					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
-						status: 200,
-						headers: { "content-type": "text/event-stream" },
-					}),
-				);
+		// A received 429 is a received generation request: the send counts
+		// (the contract counts attempts, not accepted inference), so no
+		// automatic second send follows. Recovery is a new generation with
+		// fresh permission.
+		it("SSE: received 429 stops after one send (no automatic retry)", async () => {
+			const fetchMock = vi.fn(async () => new Response("slow", { status: 429 }));
 			const facts: Array<{ attemptSeq?: number; transport?: string }> = [];
 			const events = await drain(
 				streamOpenAICodexResponses(MODEL, testContext(), {
@@ -282,10 +293,10 @@ describe("governed request denial", () => {
 					onDispatch: (fact) => facts.push(fact),
 				}),
 			);
-			expect(fetchMock).toHaveBeenCalledTimes(2);
-			expect(facts.map((f) => f.attemptSeq)).toEqual([1, 2]);
-			const done = events.filter((e) => (e as { type?: string }).type === "done");
-			expect(done.length).toBe(1);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(facts.map((f) => f.attemptSeq)).toEqual([1]);
+			const errors = events.filter((e) => (e as { type?: string }).type === "error");
+			expect(errors.length).toBe(1);
 		});
 
 		it("WS: pre-send abort sends nothing", async () => {
@@ -330,6 +341,109 @@ describe("governed request denial", () => {
 			expect(first["model"]).toBe("gpt-5.1-codex");
 			expect(first["accountId"]).toBe("acc_test");
 			expect(first["priorSends"]).toBe(0);
+		});
+
+		// R-DELTA-CUT: the native cut is the exact suffix after the recorded
+		// baseline (previous request + response items), linked to the actual
+		// preceding response id on the same connection state.
+		it("WS: continuation sends the exact delta linked to the preceding response", async () => {
+			class ScriptedSocket {
+				private listeners = new Map<string, Set<(event: unknown) => void>>();
+				constructor() {
+					queueMicrotask(() => this.emit("open", {}));
+				}
+				addEventListener(type: string, listener: (event: unknown) => void): void {
+					let set = this.listeners.get(type);
+					if (!set) {
+						set = new Set();
+						this.listeners.set(type, set);
+					}
+					set.add(listener);
+				}
+				removeEventListener(type: string, listener: (event: unknown) => void): void {
+					this.listeners.get(type)?.delete(listener);
+				}
+				send(data: string): void {
+					MockWebSocket.sent.push(JSON.parse(data));
+					queueMicrotask(() => {
+						this.emit("message", {
+							data: JSON.stringify({ type: "response.created", response: { id: "resp_1" } }),
+						});
+						this.emit("message", {
+							data: JSON.stringify({
+								type: "response.completed",
+								response: { id: "resp_1", status: "completed", end_turn: true },
+							}),
+						});
+					});
+				}
+				close(): void {}
+				private emit(type: string, event: unknown): void {
+					for (const listener of this.listeners.get(type) ?? []) listener(event);
+				}
+			}
+			MockWebSocket.sent = [];
+			vi.stubGlobal("WebSocket", ScriptedSocket);
+			const seen: Array<{ sentLen: number; fullLen: number; prevId: unknown }> = [];
+			const opts = {
+				apiKey: mockToken(),
+				transport: "auto" as const,
+				sessionId: "delta-cut-test",
+				fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+				governRequest: (body: unknown, envelope: unknown) => {
+					const b = body as { input?: unknown[] };
+					const e = envelope as { fullBody?: { input?: unknown[] } };
+					seen.push({
+						sentLen: b.input?.length ?? -1,
+						fullLen: e.fullBody?.input?.length ?? -1,
+						prevId: (b as { previous_response_id?: unknown }).previous_response_id,
+					});
+				},
+			};
+			const ctx1 = normalizeContext({
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+			});
+			await drain(streamOpenAICodexResponses(MODEL, ctx1, opts));
+			const ctx2 = normalizeContext({
+				systemPrompt: "You are a helpful assistant.",
+				messages: [
+					{ role: "user", content: "Say hello", timestamp: Date.now() },
+					{ role: "user", content: "And more", timestamp: Date.now() },
+				],
+			});
+			await drain(streamOpenAICodexResponses(MODEL, ctx2, opts));
+			expect(seen.length).toBe(2);
+			expect(seen[0].prevId).toBeUndefined();
+			// Second send is the exact delta: one new item, full body held in
+			// the envelope, linked to the actual preceding response.
+			expect(seen[1].prevId).toBe("resp_1");
+			expect(seen[1].sentLen).toBe(1);
+			expect(seen[1].fullLen).toBe(seen[1].sentLen + seen[0].sentLen);
+		});
+
+		it("a throwing dispatch listener never fails the send it observes", async () => {
+			const fetchMock = vi.fn(
+				async () =>
+					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+			const events = await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					fetch: fetchMock,
+					governRequest: () => {},
+					onDispatch: () => {
+						throw new Error("listener defect");
+					},
+				}),
+			);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			const done = events.filter((e) => (e as { type?: string }).type === "done");
+			expect(done.length).toBe(1);
 		});
 
 		it("dispatch facts are deterministic per identical bytes", async () => {
