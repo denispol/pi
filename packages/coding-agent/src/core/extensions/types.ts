@@ -26,6 +26,7 @@ import type {
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	DispatchFact,
+	DispatchReadback,
 	Provider,
 	ProviderHeaders,
 	RefreshModelsContext,
@@ -1454,6 +1455,14 @@ export interface ExtensionAPI {
 	 */
 	registerDispatchListener(listener: (fact: DispatchFact) => void): void;
 
+	/**
+	 * Terminal performed-send readback for one session (B1.3). Returns the
+	 * native retained counters, or undefined when unavailable (pre-bind)
+	 * or the session is unknown. The required consumer reconciles
+	 * unacknowledged attempts against this before holding uncertainty.
+	 */
+	getDispatchReadback(sessionId: string): DispatchReadback | undefined;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -1850,6 +1859,11 @@ export interface ExtensionActions {
 	) => void;
 	/** Bound by the runner at initialize; absent pre-bind. */
 	setDispatchListener?: (listener: ((fact: DispatchFact) => void) | undefined) => void;
+	/**
+	 * Bound by the runner at initialize; absent pre-bind. Terminal
+	 * performed-send readback for one session (B1.3).
+	 */
+	getDispatchReadback?: (sessionId: string) => DispatchReadback | undefined;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;

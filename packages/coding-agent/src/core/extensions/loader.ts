@@ -323,6 +323,18 @@ function createExtensionAPI(
 			});
 		},
 
+		/**
+		 * Terminal performed-send readback for one session (B1.3). Reads the
+		 * native session counters retained until acknowledged; undefined when
+		 * the runtime has no readback (pre-bind) or the session is unknown.
+		 */
+		getDispatchReadback(
+			sessionId: string,
+		): import("@earendil-works/pi-ai").DispatchReadback | undefined {
+			assertActive();
+			return runtime.getDispatchReadback?.(sessionId);
+		},
+
 		registerShortcut(
 			shortcut: KeyId,
 			options: {

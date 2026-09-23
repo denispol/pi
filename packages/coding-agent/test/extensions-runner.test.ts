@@ -155,6 +155,14 @@ describe("ExtensionRunner", () => {
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			expect(result.errors.length).toBeGreaterThanOrEqual(1);
 		});
+
+		it("exposes terminal dispatch readback (undefined for unknown sessions)", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			expect(runner.getDispatchReadback("no-such-session")).toBeUndefined();
+			expect(typeof result.runtime.getDispatchReadback).toBe("function");
+		});
 	});
 
 	describe("project_trust", () => {

@@ -156,6 +156,16 @@ export interface DispatchFact {
 }
 
 /**
+ * Terminal performed-send readback for one session (B1.3): how many
+ * inference-bearing sends the native observed plus the latest fact,
+ * retained until the required consumer acknowledges it.
+ */
+export interface DispatchReadback {
+	dispatchedRequests: number;
+	lastDispatchFact?: DispatchFact;
+}
+
+/**
  * Keep only a well-formed opaque governor identity; anything else means
  * a pre-identity governor whose facts carry no join (caller holds
  * uncertainty instead of committing).

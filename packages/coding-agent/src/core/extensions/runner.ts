@@ -5,7 +5,9 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	getOpenAICodexWebSocketDebugStats,
 	type DispatchFact,
+	type DispatchReadback,
 	type ImageContent,
 	isRequestDeniedError,
 	type Model,
@@ -422,6 +424,7 @@ export class ExtensionRunner {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.setRequestGovernor = (governor) => this.setRequestGovernor(governor);
 		this.runtime.setDispatchListener = (listener) => this.setDispatchListener(listener);
+		this.runtime.getDispatchReadback = (sessionId) => this.getDispatchReadback(sessionId);
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -731,6 +734,19 @@ export class ExtensionRunner {
 
 	getDispatchListener(): ((fact: DispatchFact) => void) | undefined {
 		return this.dispatchListener;
+	}
+
+	/**
+	 * Terminal performed-send readback for one session (B1.3). Reads the
+	 * native retained counters; undefined when the session is unknown.
+	 */
+	getDispatchReadback(sessionId: string): DispatchReadback | undefined {
+		const stats = getOpenAICodexWebSocketDebugStats(sessionId);
+		if (!stats) return undefined;
+		return {
+			dispatchedRequests: stats.dispatchedRequests ?? 0,
+			...(stats.lastDispatchFact !== undefined ? { lastDispatchFact: stats.lastDispatchFact } : {}),
+		};
 	}
 
 	emitError(error: ExtensionError): void {
