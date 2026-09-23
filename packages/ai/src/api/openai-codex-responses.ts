@@ -96,7 +96,15 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	 * full body and verify delta linkage against it. SSE sends carry the
 	 * full body with no `fullBody` envelope entry.
 	 */
-	governRequest?: (finalBody: unknown, envelope: GovernEnvelope) => void;
+	/**
+	 * Opaque dispatch identity the governor may return (B1 evidence join).
+	 * The caller passes its attempt id back through the governor return;
+	 * the native echoes it into the dispatch fact, joining authorization,
+	 * dispatch, and outcome to one attempt without trusting fact order.
+	 * A void return means a pre-identity governor: facts carry no identity
+	 * and the caller must hold uncertainty instead of committing.
+	 */
+	governRequest?: (finalBody: unknown, envelope: GovernEnvelope) => string | void;
 	/**
 	 * Dispatch observer (optional). Called once per inference-bearing send
 	 * that was performed or possibly performed, with a correlation fact.
@@ -135,9 +143,45 @@ export interface DispatchFact {
 	/** cyrb53 hex of the exact sent bytes; correlation-only, not security. */
 	payloadHash: string;
 	byteLength: number;
+	/**
+	 * cyrb53 hex of `JSON.stringify` of the exact object passed to the
+	 * governor for this send. The caller holds the same reference, so its
+	 * own serialization is byte-identical; equality joins the fact to the
+	 * authorized bytes (both transports; WS hashes the governed delta body,
+	 * not the framed wire bytes).
+	 */
+	governHash: string;
+	/** Opaque caller attempt identity echoed from the governor return. */
+	identity?: string;
 }
 
-function hashDispatchBytes(data: string | Uint8Array): string {
+/**
+ * Keep only a well-formed opaque governor identity; anything else means
+ * a pre-identity governor whose facts carry no join (caller holds
+ * uncertainty instead of committing).
+ */
+function captureGovernIdentity(result: string | void): string | undefined {
+	return typeof result === "string" && result.length > 0 ? result : undefined;
+}
+
+/**
+ * Terminal performed-send readback: session-scoped count plus the latest
+ * fact, retained natively until the required consumer acknowledges it.
+ * Sessions without cache retention have no readback (documented limit).
+ */
+function recordSessionDispatch(sessionId: string | undefined, fact: DispatchFact): void {
+	if (sessionId === undefined) return;
+	const stats = getOrCreateWebSocketDebugStats(sessionId);
+	stats.dispatchedRequests += 1;
+	stats.lastDispatchFact = { ...fact };
+}
+
+/**
+ * cyrb53 of the exact bytes. Exported so evidence consumers (which cannot
+ * import this module, e.g. plain-JS extensions) can port it and cross-check
+ * against the fixed vector in the test below.
+ */
+export function hashDispatchBytes(data: string | Uint8Array): string {
 	let h1 = 0xdeadbeef;
 	let h2 = 0x41c6ce57;
 	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
@@ -358,7 +402,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// After a possible inference-bearing send there is no automatic
 			// second send: retries and the SSE fallback run only while no
 			// send has been performed. Anything later stops uncertain.
-			const dispatchState = { sends: 0 };
+			// B1 evidence join: per-invocation governor echo (identity +
+			// governed-bytes hash) attached to every dispatch fact.
+			const dispatchState: { sends: number; identity?: string; governHash?: string } = { sends: 0 };
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
@@ -454,12 +500,17 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// the fetch below never runs and the HTTP retry loop never starts.
 			// priorSends carries WS sends when this SSE path is a post-WS fallback:
 			// nonzero means a recovery resend needing fresh permission.
-			options?.governRequest?.(body, {
-				transport: "sse",
-				model: body.model,
-				accountId,
-				priorSends: dispatchState.sends,
-			});
+			dispatchState.identity = captureGovernIdentity(
+				options?.governRequest?.(body, {
+					transport: "sse",
+					model: body.model,
+					accountId,
+					priorSends: dispatchState.sends,
+				}),
+			);
+			// bodyJson is the exact SSE wire string; the caller holds the
+			// same body reference, so its serialization matches byte-for-byte.
+			dispatchState.governHash = hashDispatchBytes(bodyJson);
 			// Recheck cancellation after governance (same reason as the WS path).
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -468,13 +519,17 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				dispatchState.sends += 1;
 				const bytes =
 					typeof sseBody === "string" ? new TextEncoder().encode(sseBody).byteLength : sseBody.byteLength;
+				const fact: DispatchFact = {
+					attemptSeq: dispatchState.sends,
+					transport: "sse",
+					payloadHash: hashDispatchBytes(sseBody),
+					byteLength: bytes,
+					governHash: dispatchState.governHash ?? "",
+					...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+				};
+				recordSessionDispatch(cacheSessionId, fact);
 				try {
-					options?.onDispatch?.({
-						attemptSeq: dispatchState.sends,
-						transport: "sse",
-						payloadHash: hashDispatchBytes(sseBody),
-						byteLength: bytes,
-					});
+					options?.onDispatch?.(fact);
 				} catch {
 					// Listener defects are the extension's own logs, not send failures.
 				}
@@ -986,6 +1041,10 @@ export interface OpenAICodexWebSocketDebugStats {
 	sseFallbacks: number;
 	websocketFallbackActive?: boolean;
 	lastWebSocketError?: string;
+	/** Performed-or-possible sends observed at socket.send/fetch time. */
+	dispatchedRequests: number;
+	/** Latest dispatch fact, retained until the required consumer acks. */
+	lastDispatchFact?: DispatchFact;
 }
 
 const websocketSessionCache = new Map<string, Map<string, CachedWebSocketConnection>>();
@@ -1006,6 +1065,7 @@ function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocket
 			lastInputItems: 0,
 			websocketFailures: 0,
 			sseFallbacks: 0,
+			dispatchedRequests: 0,
 		};
 		websocketDebugStats.set(sessionId, stats);
 	}
@@ -1585,19 +1645,23 @@ async function processWebSocketStream(
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
-	dispatchState: { sends: number } = { sends: 0 },
+	dispatchState: { sends: number; identity?: string; governHash?: string } = { sends: 0 },
 ): Promise<void> {
 	const noteDispatch = (payload: string | Uint8Array) => {
 		dispatchState.sends += 1;
 		const bytes = typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
+		const fact: DispatchFact = {
+			attemptSeq: dispatchState.sends,
+			transport: "websocket",
+			payloadHash: hashDispatchBytes(payload),
+			byteLength: bytes,
+			governHash: dispatchState.governHash ?? "",
+			...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+		};
+		recordSessionDispatch(cacheSessionId, fact);
 		// A throwing listener must never fail the send it observes.
 		try {
-			options?.onDispatch?.({
-				attemptSeq: dispatchState.sends,
-				transport: "websocket",
-				payloadHash: hashDispatchBytes(payload),
-				byteLength: bytes,
-			});
+			options?.onDispatch?.(fact);
 		} catch {
 			// Listener defects are the extension's own logs, not send failures.
 		}
@@ -1620,13 +1684,19 @@ async function processWebSocketStream(
 	// Final-send governor sees the exact post-delta payload plus the full
 	// pre-delta body for content authorization and delta-linkage checks.
 	// Denial throws terminally (non-transport): socket.send never runs.
-	options?.governRequest?.(requestBody, {
-		transport: "websocket",
-		fullBody: fullBody,
-		model: fullBody.model,
-		accountId,
-		priorSends: dispatchState.sends,
-	});
+	// The return carries the caller's opaque dispatch identity into the fact.
+	dispatchState.identity = captureGovernIdentity(
+		options?.governRequest?.(requestBody, {
+			transport: "websocket",
+			fullBody: fullBody,
+			model: fullBody.model,
+			accountId,
+			priorSends: dispatchState.sends,
+		}),
+	);
+	// Governed-bytes hash over the exact object the governor authorized
+	// (the delta body on continuation, not the framed wire bytes).
+	dispatchState.governHash = hashDispatchBytes(JSON.stringify(requestBody));
 	// Recheck cancellation after governance: an abort that landed while the
 	// governor ran must not turn an allowance into a send.
 	if (options?.signal?.aborted) {

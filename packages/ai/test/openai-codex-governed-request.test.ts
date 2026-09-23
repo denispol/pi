@@ -18,7 +18,14 @@
 //   the N/B integration slice, not this file.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ProviderRequestDeniedError, stream as streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
+import {
+	getOpenAICodexWebSocketDebugStats,
+	hashDispatchBytes,
+	ProviderRequestDeniedError,
+	resetOpenAICodexWebSocketDebugStats,
+	stream as streamOpenAICodexResponses,
+} from "../src/api/openai-codex-responses.ts";
+import type { DispatchFact } from "../src/api/openai-codex-responses.ts";
 import type { Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -444,6 +451,94 @@ describe("governed request denial", () => {
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			const done = events.filter((e) => (e as { type?: string }).type === "done");
 			expect(done.length).toBe(1);
+		});
+
+		it("dispatch fact echoes the governor-returned identity and governed-bytes hash", async () => {
+			let governed: unknown;
+			const facts: DispatchFact[] = [];
+			const fetchMock = vi.fn(
+				async () =>
+					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+			await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					fetch: fetchMock,
+					governRequest: (body) => {
+						governed = body;
+						return "caller-attempt-7";
+					},
+					onDispatch: (fact) => {
+						facts.push(fact);
+					},
+				}),
+			);
+			expect(facts).toHaveLength(1);
+			expect(facts[0]?.identity).toBe("caller-attempt-7");
+			// Same reference the caller holds: byte-identical serialization.
+			expect(facts[0]?.governHash).toBe(hashDispatchBytes(JSON.stringify(governed)));
+		});
+
+		it("void governor return leaves identity undefined but still hashes (pre-identity compat)", async () => {
+			const facts: DispatchFact[] = [];
+			const fetchMock = vi.fn(
+				async () =>
+					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+			await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					fetch: fetchMock,
+					governRequest: () => {},
+					onDispatch: (fact) => {
+						facts.push(fact);
+					},
+				}),
+			);
+			expect(facts).toHaveLength(1);
+			expect(facts[0]?.identity).toBeUndefined();
+			expect(typeof facts[0]?.governHash).toBe("string");
+			expect((facts[0]?.governHash ?? "").length).toBeGreaterThan(0);
+		});
+
+		it("session readback retains the performed send until acknowledged", async () => {
+			const sessionId = "b1-readback-session";
+			resetOpenAICodexWebSocketDebugStats(sessionId);
+			const facts: DispatchFact[] = [];
+			const fetchMock = vi.fn(
+				async () =>
+					new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+			await drain(
+				streamOpenAICodexResponses(MODEL, testContext(), {
+					apiKey: mockToken(),
+					transport: "sse",
+					sessionId,
+					fetch: fetchMock,
+					governRequest: () => "caller-attempt-3",
+					onDispatch: (fact) => {
+						facts.push(fact);
+					},
+				}),
+			);
+			const stats = getOpenAICodexWebSocketDebugStats(sessionId);
+			expect(stats?.dispatchedRequests).toBe(1);
+			expect(stats?.lastDispatchFact).toEqual(facts[0]);
+		});
+
+		it("cyrb53 dispatch-hash vector (evidence consumers port this)", () => {
+			expect(hashDispatchBytes("thinking-adjuster-b1")).toBe("7f57b39bd8a6636d");
 		});
 
 		it("dispatch facts are deterministic per identical bytes", async () => {

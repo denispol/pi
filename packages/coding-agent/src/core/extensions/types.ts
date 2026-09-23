@@ -1444,7 +1444,7 @@ export interface ExtensionAPI {
 	 * logged-and-continued.
 	 */
 	registerRequestGovernor(
-		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void,
+		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void,
 	): void;
 
 	/**
@@ -1845,7 +1845,7 @@ export interface ExtensionActions {
 	/** Bound by the runner at initialize; absent pre-bind. */
 	setRequestGovernor?: (
 		governor:
-			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
+			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
 			| undefined,
 	) => void;
 	/** Bound by the runner at initialize; absent pre-bind. */
@@ -1932,7 +1932,7 @@ export interface Extension {
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Final-send request governor (last registration wins at bind). */
-	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
+	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void;
 	/** Dispatch-fact subscriber (last registration wins at bind). */
 	dispatchListener?: (fact: DispatchFact) => void;
 }
