@@ -317,9 +317,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 		const headerRunner = extensionRunnerRef.current;
 		const requestGovernor = extensionRunnerRef.current?.getRequestGovernor();
+		const dispatchListener = extensionRunnerRef.current?.getDispatchListener();
 		return {
 			...options,
 			...(requestGovernor ? { governRequest: requestGovernor } : {}),
+			...(dispatchListener ? { onDispatch: dispatchListener } : {}),
 			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,

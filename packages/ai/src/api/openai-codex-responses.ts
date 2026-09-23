@@ -228,50 +228,7 @@ function assertSuccessfulOutput(output: AssistantMessage): asserts output is Suc
 // Retry Helpers
 // ============================================================================
 
-function isTerminalRateLimitError(errorText: string): boolean {
-	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
-		errorText,
-	);
-}
-
-function getRetryAfterDelayMs(headers: Headers): number | undefined {
-	const retryAfterMs = headers.get("retry-after-ms");
-	if (retryAfterMs !== null) {
-		const millis = Number(retryAfterMs);
-		if (Number.isFinite(millis)) {
-			return Math.max(0, millis);
-		}
-	}
-
-	const retryAfter = headers.get("retry-after");
-	if (!retryAfter) {
-		return undefined;
-	}
-
-	const seconds = Number(retryAfter);
-	if (Number.isFinite(seconds)) {
-		return Math.max(0, seconds * 1000);
-	}
-
-	const date = Date.parse(retryAfter);
-	if (!Number.isNaN(date)) {
-		return Math.max(0, date - Date.now());
-	}
-
-	return undefined;
-}
-
 class RetryDelayExceededError extends Error {}
-
-function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
-	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
-	if (maxRetryDelayMs > 0 && delayMs > maxRetryDelayMs) {
-		throw new RetryDelayExceededError(
-			`Server requested ${Math.ceil(delayMs / 1000)}s retry delay (max: ${Math.ceil(maxRetryDelayMs / 1000)}s)`,
-		);
-	}
-	return delayMs;
-}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
@@ -511,12 +468,16 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				dispatchState.sends += 1;
 				const bytes =
 					typeof sseBody === "string" ? new TextEncoder().encode(sseBody).byteLength : sseBody.byteLength;
-				options?.onDispatch?.({
-					attemptSeq: dispatchState.sends,
-					transport: "sse",
-					payloadHash: hashDispatchBytes(sseBody),
-					byteLength: bytes,
-				});
+				try {
+					options?.onDispatch?.({
+						attemptSeq: dispatchState.sends,
+						transport: "sse",
+						payloadHash: hashDispatchBytes(sseBody),
+						byteLength: bytes,
+					});
+				} catch {
+					// Listener defects are the extension's own logs, not send failures.
+				}
 			};
 
 			// Fetch with retry logic for rate limits and transient errors
@@ -565,20 +526,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					}
 
 					const errorText = await response.text();
-					// Only a definitive non-execution signal (non-terminal 429:
-					// the server refused before running inference) retries
-					// automatically. Any other error status after a performed
-					// send is ambiguous delivery: stop uncertain, no second send.
-					if (attempt < maxRetries && response.status === 429 && !isTerminalRateLimitError(errorText)) {
-						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
-						const delayMs =
-							retryAfterDelayMs === undefined
-								? BASE_DELAY_MS * 2 ** attempt
-								: validateRetryDelayMs(retryAfterDelayMs, options);
-
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
+					// Any error status after a performed send is terminal: the
+					// receiver obtained the generation request (a 429 still counts
+					// a send under the contract, which counts attempts, not
+					// accepted inference). No automatic second send; recovery is
+					// a new generation with fresh permission. Only provably
+					// pre-send connection failures (catch path below) may retry.
 
 					// Parse error for friendly message on final attempt or non-retryable error
 					const fakeResponse = new Response(errorText, {
@@ -1637,12 +1590,17 @@ async function processWebSocketStream(
 	const noteDispatch = (payload: string | Uint8Array) => {
 		dispatchState.sends += 1;
 		const bytes = typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
-		options?.onDispatch?.({
-			attemptSeq: dispatchState.sends,
-			transport: "websocket",
-			payloadHash: hashDispatchBytes(payload),
-			byteLength: bytes,
-		});
+		// A throwing listener must never fail the send it observes.
+		try {
+			options?.onDispatch?.({
+				attemptSeq: dispatchState.sends,
+				transport: "websocket",
+				payloadHash: hashDispatchBytes(payload),
+				byteLength: bytes,
+			});
+		} catch {
+			// Listener defects are the extension's own logs, not send failures.
+		}
 	};
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,

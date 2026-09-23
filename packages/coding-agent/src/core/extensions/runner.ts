@@ -5,6 +5,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	type DispatchFact,
 	type ImageContent,
 	isRequestDeniedError,
 	type Model,
@@ -363,6 +364,7 @@ export class ExtensionRunner {
 	private requestGovernor:
 		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
 		| undefined;
+	private dispatchListener: ((fact: DispatchFact) => void) | undefined;
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -412,12 +414,14 @@ export class ExtensionRunner {
 			unregisterProvider?: (name: string) => void;
 		},
 	): void {
-		// Bind load-time governor registrations (last extension wins).
+		// Bind load-time governor and dispatch-listener registrations (last wins).
 		for (const ext of this.extensions) {
 			if (ext.requestGovernor) this.requestGovernor = ext.requestGovernor;
+			if (ext.dispatchListener) this.dispatchListener = ext.dispatchListener;
 		}
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.setRequestGovernor = (governor) => this.setRequestGovernor(governor);
+		this.runtime.setDispatchListener = (listener) => this.setDispatchListener(listener);
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -718,6 +722,15 @@ export class ExtensionRunner {
 		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
 		| undefined {
 		return this.requestGovernor;
+	}
+
+	/** Subscribe to native dispatch facts (at most one; last wins). */
+	setDispatchListener(listener: ((fact: DispatchFact) => void) | undefined): void {
+		this.dispatchListener = listener;
+	}
+
+	getDispatchListener(): ((fact: DispatchFact) => void) | undefined {
+		return this.dispatchListener;
 	}
 
 	emitError(error: ExtensionError): void {

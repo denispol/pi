@@ -126,6 +126,37 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("dispatch listener", () => {
+		it("binds the last load-time dispatch-listener registration", async () => {
+			const mk = (tag: string) => `
+				export default function(pi) {
+					pi.registerDispatchListener((fact) => ({ tag: "${tag}", fact }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), mk("first"));
+			fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), mk("second"));
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			const listener = runner.getDispatchListener();
+			expect(typeof listener).toBe("function");
+			const out = listener!({ attemptSeq: 1, transport: "sse", payloadHash: "ab", byteLength: 3 }) as unknown as {
+				tag: string;
+			};
+			expect(out.tag).toBe("second");
+		});
+
+		it("rejects a non-function dispatch listener", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "bad.ts"),
+				`export default function(pi) { pi.registerDispatchListener("nope"); }`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors.length).toBeGreaterThanOrEqual(1);
+		});
+	});
+
 	describe("project_trust", () => {
 		it("continues past undecided handlers and returns the first yes/no decision", async () => {
 			const undecidedPath = path.join(extensionsDir, "undecided.ts");

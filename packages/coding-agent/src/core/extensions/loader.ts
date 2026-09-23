@@ -308,6 +308,21 @@ function createExtensionAPI(
 			});
 		},
 
+		registerDispatchListener(
+			listener: (fact: import("@earendil-works/pi-ai").DispatchFact) => void,
+		): void {
+			assertActive();
+			if (typeof listener !== "function") {
+				throw new Error(`Dispatch listener registered by extension "${extension.path}" must be a function.`);
+			}
+			// Stored on the extension record (like the governor): bound by the
+			// runner at initialize, so load-time subscription cannot be dropped.
+			applyRuntimeChange(() => {
+				extension.dispatchListener = listener;
+				runtime.setDispatchListener?.(listener);
+			});
+		},
+
 		registerShortcut(
 			shortcut: KeyId,
 			options: {

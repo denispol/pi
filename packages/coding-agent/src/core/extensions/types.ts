@@ -25,6 +25,7 @@ import type {
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
+	DispatchFact,
 	Provider,
 	ProviderHeaders,
 	RefreshModelsContext,
@@ -1446,6 +1447,13 @@ export interface ExtensionAPI {
 		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void,
 	): void;
 
+	/**
+	 * Subscribe to native dispatch facts (at most one; last wins). The
+	 * listener observes each performed-or-possible inference-bearing send;
+	 * it must never throw into the send path (native guards the call).
+	 */
+	registerDispatchListener(listener: (fact: DispatchFact) => void): void;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -1840,6 +1848,8 @@ export interface ExtensionActions {
 			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void)
 			| undefined,
 	) => void;
+	/** Bound by the runner at initialize; absent pre-bind. */
+	setDispatchListener?: (listener: ((fact: DispatchFact) => void) | undefined) => void;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
@@ -1923,6 +1933,8 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Final-send request governor (last registration wins at bind). */
 	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => void;
+	/** Dispatch-fact subscriber (last registration wins at bind). */
+	dispatchListener?: (fact: DispatchFact) => void;
 }
 
 /** Result of loading extensions. */
