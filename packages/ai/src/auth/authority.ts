@@ -20,6 +20,7 @@
  * rather than guessed (fail-closed, documented).
  */
 
+import type { createHash } from "node:crypto";
 import type { OAuthCredential } from "./types.ts";
 
 export interface SelectionRecord {
@@ -31,16 +32,24 @@ export interface SelectionRecord {
 
 const registry = new Map<string, SelectionRecord & { modelId: string; providerId: string }>();
 
+type ProcessWithCryptoBuiltinModule = typeof process & {
+	getBuiltinModule?: (id: "node:crypto") => { createHash: typeof createHash };
+};
+
+// process.getBuiltinModule (repo pattern, see openai-codex-responses.ts zlib)
+// keeps this module browser-bundle-safe: bundlers see no node:crypto import
+// edge, yet under Node the digest is identical to createHash("sha256"). Test
+// environments that shadow globalThis.crypto are unaffected. Non-Node
+// runtimes fail closed rather than emit a weak fingerprint.
 function fingerprintKey(key: string): string {
-	// globalThis.crypto.hash (sync SHA-256, Node >= 21.7) keeps this module
-	// browser-bundle-safe: no node:crypto import for bundlers to resolve, and
-	// the digest bytes are identical to createHash("sha256"). Non-conforming
-	// runtimes fail closed rather than emit a weak fingerprint.
-	const hash = (globalThis.crypto as { hash?: (alg: string, data: string, enc: string) => string } | undefined)?.hash;
-	if (typeof hash !== "function") {
-		throw new Error("crypto.hash unavailable: key fingerprinting requires Node >= 21.7");
+	const crypto =
+		typeof process === "undefined"
+			? undefined
+			: (process as ProcessWithCryptoBuiltinModule).getBuiltinModule?.("node:crypto");
+	if (!crypto) {
+		throw new Error("node:crypto unavailable: key fingerprinting requires a Node-compatible runtime");
 	}
-	return `keyfp:${hash("sha256", key, "hex").slice(0, 16)}`;
+	return `keyfp:${crypto.createHash("sha256").update(key, "utf8").digest("hex").slice(0, 16)}`;
 }
 
 /**

@@ -1664,7 +1664,10 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
-	it("reconnects once when the websocket connection limit is reached before output starts", async () => {
+	// C2 dispatch contract: the limit error arrives after socket.send(), so the
+	// send was performed. Reconnecting would be a second inference-bearing send
+	// without fresh permission — the outcome is terminal uncertainty instead.
+	it("stops uncertain when the websocket connection limit error arrives post-send", async () => {
 		const token = mockToken();
 		let connections = 0;
 
@@ -1717,12 +1720,15 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 		}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(connections).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("websocket_connection_limit_reached");
+		expect(connections).toBe(1);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("falls back to SSE when a websocket is idle before the first event", async () => {
+	// C2 dispatch contract: the send was already performed when the idle timer
+	// fires, so falling back to SSE would silently resend. Terminal instead.
+	it("stops uncertain when a websocket goes idle after send (no SSE resend)", async () => {
 		vi.useFakeTimers();
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
@@ -1815,12 +1821,13 @@ describe("openai-codex streaming", () => {
 		await vi.advanceTimersByTimeAsync(50);
 
 		const result = await resultPromise;
-		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("idle timeout");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentBodies).toHaveLength(1);
 		expect(getOpenAICodexWebSocketDebugStats("ws-idle-before-start")).toMatchObject({
-			websocketFailures: 1,
-			sseFallbacks: 1,
-			websocketFallbackActive: true,
+			websocketFailures: 0,
+			sseFallbacks: 0,
 		});
 	});
 
@@ -2185,223 +2192,264 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
-	it.each(["websocket", "sse"] as const)(
-		"recovers a missing cached websocket continuation via %s",
-		async (recoveryTransport) => {
-			const token = mockToken();
-			const sessionId = `missing-continuation-${recoveryTransport}`;
-			const encoder = new TextEncoder();
-			const fetchMock = vi.fn(
-				async () =>
-					new Response(
-						new ReadableStream<Uint8Array>({
-							start(controller) {
-								controller.enqueue(encoder.encode(buildSSEPayload({ status: "completed" })));
-								controller.close();
-							},
-						}),
-						{ status: 200, headers: { "content-type": "text/event-stream" } },
-					),
-			);
-			vi.stubGlobal("fetch", fetchMock);
-			const sentBodies: Array<{
-				connectionId: number;
-				input: unknown[];
-				previous_response_id?: string;
-			}> = [];
-			let connections = 0;
+	// C2 dispatch contract: the delta send was performed before the
+	// previous_response_not_found error arrived, so neither a websocket resend
+	// nor an SSE fallback may run — the outcome is terminal uncertainty.
+	it("stops uncertain on a missing cached websocket continuation (post-send, no resend)", async () => {
+		const token = mockToken();
+		const sessionId = "missing-continuation";
+		const encoder = new TextEncoder();
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(buildSSEPayload({ status: "completed" })));
+							controller.close();
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const sentBodies: Array<{
+			connectionId: number;
+			input: unknown[];
+			previous_response_id?: string;
+		}> = [];
+		let connections = 0;
 
-			class MockWebSocket {
-				static OPEN = 1;
-				static CLOSED = 3;
-				readyState = MockWebSocket.OPEN;
-				private readonly connectionId = ++connections;
-				private listeners = new Map<string, Set<(event: unknown) => void>>();
+		class MockWebSocket {
+			static OPEN = 1;
+			static CLOSED = 3;
+			readyState = MockWebSocket.OPEN;
+			private readonly connectionId = ++connections;
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
 
-				constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
-					queueMicrotask(() => this.dispatch("open", {}));
+			constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
 				}
+				listeners.add(listener);
+			}
 
-				addEventListener(type: string, listener: (event: unknown) => void): void {
-					let listeners = this.listeners.get(type);
-					if (!listeners) {
-						listeners = new Set();
-						this.listeners.set(type, listeners);
-					}
-					listeners.add(listener);
-				}
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
 
-				removeEventListener(type: string, listener: (event: unknown) => void): void {
-					this.listeners.get(type)?.delete(listener);
-				}
-
-				send(data: string): void {
-					const body = JSON.parse(data) as { input: unknown[]; previous_response_id?: string };
-					sentBodies.push({ ...body, connectionId: this.connectionId });
-					if (sentBodies.length === 2) {
-						this.dispatchEvents([
-							{
-								type: "codex.rate_limits",
-								plan_type: "plus",
-								rate_limits: {
-									allowed: true,
-									limit_reached: false,
-									primary: {
-										used_percent: 7,
-										window_minutes: 10080,
-										reset_after_seconds: 556112,
-										reset_at: 1785269351,
-									},
-									secondary: null,
-								},
-								code_review_rate_limits: null,
-								additional_rate_limits: null,
-								credits: { has_credits: false, unlimited: false, balance: "0" },
-								promo: null,
-							},
-							{
-								type: "error",
-								status: 400,
-								error: {
-									code: "previous_response_not_found",
-									message: "Previous response with id 'resp_1' not found.",
-									param: "previous_response_id",
-								},
-							},
-						]);
-						return;
-					}
-					if (sentBodies.length === 3 && recoveryTransport === "sse") {
-						queueMicrotask(() => this.dispatch("error", { message: "retry websocket failed" }));
-						return;
-					}
-
-					const response =
-						sentBodies.length === 1
-							? { responseId: "resp_1", messageId: "msg_1", text: "Hello" }
-							: { responseId: "resp_2", messageId: "msg_2", text: "Recovered" };
+			send(data: string): void {
+				const body = JSON.parse(data) as { input: unknown[]; previous_response_id?: string };
+				sentBodies.push({ ...body, connectionId: this.connectionId });
+				if (sentBodies.length === 2) {
 					this.dispatchEvents([
-						{ type: "response.created", response: { id: response.responseId } },
 						{
-							type: "response.output_item.added",
-							output_index: 0,
-							item: {
-								type: "message",
-								id: response.messageId,
-								role: "assistant",
-								status: "in_progress",
-								content: [],
+							type: "codex.rate_limits",
+							plan_type: "plus",
+							rate_limits: {
+								allowed: true,
+								limit_reached: false,
+								primary: {
+									used_percent: 7,
+									window_minutes: 10080,
+									reset_after_seconds: 556112,
+									reset_at: 1785269351,
+								},
+								secondary: null,
 							},
+							code_review_rate_limits: null,
+							additional_rate_limits: null,
+							credits: { has_credits: false, unlimited: false, balance: "0" },
+							promo: null,
 						},
 						{
-							type: "response.output_item.done",
-							output_index: 0,
-							item: {
-								type: "message",
-								id: response.messageId,
-								role: "assistant",
-								status: "completed",
-								content: [{ type: "output_text", text: response.text }],
-							},
-						},
-						{
-							type: "response.completed",
-							response: {
-								id: response.responseId,
-								status: "completed",
-								usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+							type: "error",
+							status: 400,
+							error: {
+								code: "previous_response_not_found",
+								message: "Previous response with id 'resp_1' not found.",
+								param: "previous_response_id",
 							},
 						},
 					]);
+					return;
 				}
+				const response =
+					sentBodies.length === 1
+						? { responseId: "resp_1", messageId: "msg_1", text: "Hello" }
+						: { responseId: "resp_2", messageId: "msg_2", text: "Recovered" };
+				this.dispatchEvents([
+					{ type: "response.created", response: { id: response.responseId } },
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: {
+							type: "message",
+							id: response.messageId,
+							role: "assistant",
+							status: "in_progress",
+							content: [],
+						},
+					},
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: {
+							type: "message",
+							id: response.messageId,
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: response.text }],
+						},
+					},
+					{
+						type: "response.completed",
+						response: {
+							id: response.responseId,
+							status: "completed",
+							usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+						},
+					},
+				]);
+			}
 
-				close(): void {
-					this.readyState = MockWebSocket.CLOSED;
-				}
+			close(): void {
+				this.readyState = MockWebSocket.CLOSED;
+			}
 
-				private dispatchEvents(events: unknown[]): void {
-					queueMicrotask(() => {
-						for (const event of events) {
-							this.dispatch("message", { data: JSON.stringify(event) });
-						}
-					});
-				}
-
-				private dispatch(type: string, event: unknown): void {
-					for (const listener of this.listeners.get(type) ?? []) {
-						listener(event);
+			private dispatchEvents(events: unknown[]): void {
+				queueMicrotask(() => {
+					for (const event of events) {
+						this.dispatch("message", { data: JSON.stringify(event) });
 					}
+				});
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) {
+					listener(event);
 				}
 			}
+		}
 
-			vi.stubGlobal("WebSocket", MockWebSocket);
+		vi.stubGlobal("WebSocket", MockWebSocket);
 
-			const model: Model<"openai-codex-responses"> = {
-				id: "gpt-5.1-codex",
-				name: "GPT-5.1 Codex",
-				api: "openai-codex-responses",
-				provider: "openai-codex",
-				baseUrl: "https://chatgpt.com/backend-api",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 400000,
-				maxTokens: 128000,
-			};
-			const firstContext = normalizeContext({
-				systemPrompt: "You are a helpful assistant.",
-				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
-			});
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const firstContext = normalizeContext({
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+		});
 
-			const first = await streamOpenAICodexResponses(model, firstContext, {
-				apiKey: token,
-				sessionId,
-				transport: "websocket-cached",
-			}).result();
-			const secondContext = normalizeContext({
-				messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
-			});
-			const eventTypes: string[] = [];
-			const secondStream = streamOpenAICodexResponses(model, secondContext, {
-				apiKey: token,
-				sessionId,
-				transport: "websocket-cached",
-			});
-			for await (const event of secondStream) {
-				eventTypes.push(event.type);
+		const first = await streamOpenAICodexResponses(model, firstContext, {
+			apiKey: token,
+			sessionId,
+			transport: "websocket-cached",
+		}).result();
+		const secondContext = normalizeContext({
+			messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
+		});
+		const eventTypes: string[] = [];
+		const secondStream = streamOpenAICodexResponses(model, secondContext, {
+			apiKey: token,
+			sessionId,
+			transport: "websocket-cached",
+		});
+		for await (const event of secondStream) {
+			eventTypes.push(event.type);
+		}
+		const second = await secondStream.result();
+
+		expect(second.stopReason).toBe("error");
+		expect(second.errorMessage).toContain("not found");
+		expect(eventTypes).toContain("error");
+		expect(connections).toBe(1);
+		expect(sentBodies).toHaveLength(2);
+		expect(sentBodies.map((body) => body.connectionId)).toEqual([1, 1]);
+		expect(sentBodies[1].previous_response_id).toBe("resp_1");
+		expect(sentBodies[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(getOpenAICodexWebSocketDebugStats(sessionId)).toMatchObject({
+			requests: 2,
+			connectionsCreated: 1,
+			connectionsReused: 1,
+			fullContextRequests: 1,
+			deltaRequests: 1,
+			websocketFailures: 0,
+			sseFallbacks: 0,
+		});
+	});
+
+	// C2 dispatch contract positive side: a fetch that throws a provably
+	// pre-send connection error never reached the server, so the retry branch
+	// is preserved for it.
+	it("retries a provably pre-send SSE connection failure", async () => {
+		vi.useFakeTimers();
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const sse = buildSSEPayload({ status: "completed" });
+		let codexRequests = 0;
+
+		const fetchMock = vi.fn(async () => {
+			codexRequests++;
+			if (codexRequests === 1) {
+				throw new Error("connect ECONNREFUSED 127.0.0.1:443");
 			}
-			const second = await secondStream.result();
-
-			expect(second.stopReason).toBe("stop");
-			expect(second.content.find((content) => content.type === "text")?.text).toBe(
-				recoveryTransport === "sse" ? "Hello" : "Recovered",
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(encoder.encode(sse));
+						controller.close();
+					},
+				}),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
 			);
-			expect(eventTypes.filter((type) => type === "start")).toHaveLength(1);
-			expect(eventTypes).not.toContain("error");
-			expect(connections).toBe(2);
-			expect(sentBodies).toHaveLength(3);
-			expect(sentBodies.map((body) => body.connectionId)).toEqual([1, 1, 2]);
-			expect(sentBodies[1].previous_response_id).toBe("resp_1");
-			expect(sentBodies[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);
-			expect(sentBodies[2].previous_response_id).toBeUndefined();
-			expect(sentBodies[2].input).toHaveLength(3);
-			expect(sentBodies[2].input.at(-1)).toEqual({
-				role: "user",
-				content: [{ type: "input_text", text: "Now finish" }],
-			});
-			expect(fetchMock).toHaveBeenCalledTimes(recoveryTransport === "sse" ? 1 : 0);
-			expect(getOpenAICodexWebSocketDebugStats(sessionId)).toMatchObject({
-				requests: 3,
-				connectionsCreated: 2,
-				connectionsReused: 1,
-				fullContextRequests: 2,
-				deltaRequests: 1,
-				websocketFailures: recoveryTransport === "sse" ? 1 : 0,
-				sseFallbacks: recoveryTransport === "sse" ? 1 : 0,
-			});
-		},
-	);
+		});
+		vi.stubGlobal("fetch", fetchMock);
 
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+
+		const resultPromise = streamOpenAICodexResponses(model, normalizeContext({ systemPrompt: "", messages: [] }), {
+			apiKey: token,
+			transport: "sse",
+			maxRetries: 1,
+		}).result();
+		await vi.advanceTimersByTimeAsync(1000);
+		const result = await resultPromise;
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
+		expect(codexRequests).toBe(2);
+	});
+
+	// C2 dispatch contract: a received error status means the send was
+	// performed, so retry-after headers are never honored for an automatic
+	// resend — the stream ends uncertain after the single send.
 	it.each([
 		["retry-after-ms", () => ({ "content-type": "application/json", "retry-after-ms": "1500" }), 1500],
 		["retry-after seconds", () => ({ "content-type": "application/json", "retry-after": "60" }), 60_000],
@@ -2410,7 +2458,7 @@ describe("openai-codex streaming", () => {
 			() => ({ "content-type": "application/json", "retry-after": new Date(Date.now() + 45_000).toUTCString() }),
 			45_000,
 		],
-	] as const)("uses %s for SSE retries", async (_name, makeHeaders, expectedDelay) => {
+	] as const)("post-send 429 with %s is terminal (no automatic resend)", async (_name, makeHeaders, expectedDelay) => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
@@ -2468,15 +2516,17 @@ describe("openai-codex streaming", () => {
 			maxRetries: 1,
 		}).result();
 		await vi.advanceTimersByTimeAsync(0);
-		expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), expectedDelay);
+		expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), expectedDelay);
 
-		await vi.advanceTimersToNextTimerAsync();
 		const result = await resultPromise;
-		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
-		expect(codexRequests).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("You have hit your ChatGPT usage limit.");
+		expect(codexRequests).toBe(1);
 	});
 
-	it.each([429, 503])("fails immediately when a %i retry delay exceeds the limit", async (status) => {
+	// C2 dispatch contract: any post-send error status is terminal — the
+	// retry-delay cap is moot because no resend is attempted at all.
+	it.each([429, 503])("post-send %i is terminal regardless of retry-after headers", async (status) => {
 		const token = mockToken();
 		const fetchMock = vi.fn(
 			async () =>
@@ -2512,7 +2562,7 @@ describe("openai-codex streaming", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Server requested 2s retry delay (max: 1s)");
+		expect(result.errorMessage).toBe(status === 429 ? "You have hit your ChatGPT usage limit." : "retry later");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
@@ -2589,7 +2639,9 @@ describe("openai-codex streaming", () => {
 		expect(capturedBody).toBeInstanceOf(Uint8Array);
 	});
 
-	it("uses exponential backoff across repeated SSE retries without retry headers", async () => {
+	// C2 dispatch contract: the first post-send 429 ends the stream; no
+	// backoff resend is ever scheduled.
+	it("post-send 429 is terminal — no backoff resend", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
@@ -2652,17 +2704,11 @@ describe("openai-codex streaming", () => {
 			maxRetries: 3,
 		}).result();
 		await vi.advanceTimersByTimeAsync(0);
-		expect(retryTimeoutDelays()).toEqual([1000]);
+		expect(retryTimeoutDelays()).toEqual([]);
 
-		await vi.advanceTimersToNextTimerAsync();
-		expect(retryTimeoutDelays()).toEqual([1000, 2000]);
-
-		await vi.advanceTimersToNextTimerAsync();
-		expect(retryTimeoutDelays()).toEqual([1000, 2000, 4000]);
-
-		await vi.advanceTimersToNextTimerAsync();
 		const result = await resultPromise;
-		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
-		expect(codexRequests).toBe(4);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("You have hit your ChatGPT usage limit.");
+		expect(codexRequests).toBe(1);
 	});
 });
