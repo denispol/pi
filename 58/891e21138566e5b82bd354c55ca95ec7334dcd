@@ -1,0 +1,30 @@
+packages/ai/src/api/openai-codex-responses.ts
+  h_0c8a37e330552f 8,106,197,275,485-488
+packages/ai/src/auth/authority.ts
+  h_0c8a37e330552f 23,35-43,51,59,105-124
+packages/ai/src/auth/oauth/openai-codex.ts
+  h_0c8a37e330552f 515-516
+packages/ai/src/auth/resolve.ts
+  h_0c8a37e330552f 4,155,182
+packages/ai/test/openai-codex-governed-request.test.ts
+  h_0c8a37e330552f 21,358-361,689,745
+packages/coding-agent/src/core/extensions/loader.ts
+  h_0c8a37e330552f 297-301,315,333
+packages/coding-agent/src/core/extensions/runner.ts
+  h_0c8a37e330552f 9-10,366,717,724
+packages/coding-agent/src/core/extensions/types.ts
+  h_0c8a37e330552f 23-24,1448,1857,1950-1954
+packages/coding-agent/test/extensions-runner.test.ts
+  h_0c8a37e330552f 144-151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "58891e21138566e5b82bd354c55ca95ec7334dcd",
+  "prompts": {},
+  "humans": {
+    "h_0c8a37e330552f": {
+      "author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
