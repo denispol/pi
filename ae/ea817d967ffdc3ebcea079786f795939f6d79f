@@ -1,0 +1,27 @@
+packages/ai/src/api/openai-codex-responses.ts
+  s_ef39a009c533ce::t_8b4dbc70014db3 158-167
+packages/ai/src/index.ts
+  s_ef39a009c533ce::t_a5fc42a7889ecf 19,24-28
+packages/coding-agent/src/core/extensions/loader.ts
+  s_ef39a009c533ce::t_0527cb8d15fe48 326-337
+packages/coding-agent/src/core/extensions/runner.ts
+  s_ef39a009c533ce::t_2391f8805503ea 8,10,427,739-751
+packages/coding-agent/src/core/extensions/types.ts
+  s_ef39a009c533ce::t_f91ebdb2d5a111 29,1458-1465,1862-1866
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "aeea817d967ffdc3ebcea079786f795939f6d79f",
+  "prompts": {},
+  "sessions": {
+    "s_ef39a009c533ce": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cb2b-c1b7-7591-93e2-5d461dbc0083",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}

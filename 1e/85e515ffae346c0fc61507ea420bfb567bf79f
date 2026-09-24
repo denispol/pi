@@ -1,0 +1,18 @@
+packages/ai/src/api/openai-codex-responses.ts
+  h_0c8a37e330552f 140-141,192-198,539,1671
+packages/ai/test/openai-codex-governed-request.test.ts
+  h_0c8a37e330552f 544-550,554,573-574
+packages/coding-agent/test/extensions-runner.test.ts
+  h_0c8a37e330552f 144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1e85e515ffae346c0fc61507ea420bfb567bf79f",
+  "prompts": {},
+  "humans": {
+    "h_0c8a37e330552f": {
+      "author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}

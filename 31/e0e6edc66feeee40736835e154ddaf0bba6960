@@ -1,0 +1,14 @@
+packages/ai/src/api/openai-codex-responses.ts
+  h_0c8a37e330552f 563-564
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "31e0e6edc66feeee40736835e154ddaf0bba6960",
+  "prompts": {},
+  "humans": {
+    "h_0c8a37e330552f": {
+      "author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}

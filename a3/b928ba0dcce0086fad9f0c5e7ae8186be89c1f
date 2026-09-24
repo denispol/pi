@@ -1,0 +1,23 @@
+packages/coding-agent/src/core/extensions/loader.ts
+  s_ef39a009c533ce::t_a0b34b7820189b 297
+packages/coding-agent/src/core/extensions/runner.ts
+  s_ef39a009c533ce::t_5c7b14ce3c24e7 365,715,722
+packages/coding-agent/src/core/extensions/types.ts
+  s_ef39a009c533ce::t_e80bca47206861 1447,1848,1935
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a3b928ba0dcce0086fad9f0c5e7ae8186be89c1f",
+  "prompts": {},
+  "sessions": {
+    "s_ef39a009c533ce": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cb2b-c1b7-7591-93e2-5d461dbc0083",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
