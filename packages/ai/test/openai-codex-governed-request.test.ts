@@ -159,6 +159,7 @@ describe("governed request denial", () => {
 					priorSends: 0,
 					authNamespace: "acct:acc_test",
 					authRevision: 1,
+					effortLevel: null,
 				},
 			],
 		]);
@@ -713,6 +714,29 @@ describe("C-ID account authority (shared/planning#565)", () => {
 		expect(facts.length).toBe(1);
 		expect(facts[0].authNamespace).toBe("acct:acc_A");
 		expect(facts[0].authRevision).toBe(binding?.selectionRevision);
+	});
+});
+
+describe("C-ID effort linkage (shared/planning#565)", () => {
+	it("envelope carries the pre-map effort level for the caller comparison", async () => {
+		const { noteSelectedNamespace, deriveNamespace } = await import("../src/auth/authority.ts");
+		noteSelectedNamespace("openai-codex", deriveNamespace(mockToken("acc_A")));
+		const seen: Array<{ effortLevel?: string | null }> = [];
+		MockWebSocket.sent = [];
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_A"),
+				transport: "websocket",
+				fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+				governRequest: (_body, envelope) => {
+					seen.push({ effortLevel: envelope.effortLevel });
+				},
+				reasoningEffort: "high",
+			}),
+		);
+		expect(seen).toEqual([{ effortLevel: "high" }]);
+		expect(MockWebSocket.sent.length).toBe(1);
 	});
 });
 
