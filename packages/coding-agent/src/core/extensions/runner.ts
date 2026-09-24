@@ -4,10 +4,10 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
-	getCurrentSystemMessage,
-	getOpenAICodexWebSocketDebugStats,
 	type DispatchFact,
 	type DispatchReadback,
+	getCurrentSystemMessage,
+	getOpenAICodexWebSocketDebugStats,
 	type ImageContent,
 	isRequestDeniedError,
 	type Model,
@@ -363,7 +363,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
-	private requestGovernor:
+	private requestGovernor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
 		| undefined;
 	private dispatchListener: ((fact: DispatchFact) => void) | undefined;
@@ -714,14 +714,14 @@ export class ExtensionRunner {
 
 	/** Register the final-send request governor (at most one; last wins). */
 	setRequestGovernor(
-		governor:
+		governor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
 			| undefined,
 	): void {
 		this.requestGovernor = governor;
 	}
 
-	getRequestGovernor():
+	getRequestGovernor(): // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
 		| undefined {
 		return this.requestGovernor;

@@ -20,13 +20,13 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
+	DispatchFact,
+	DispatchReadback,
 	ImageContent,
 	Message,
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
-	DispatchFact,
-	DispatchReadback,
 	Provider,
 	ProviderHeaders,
 	RefreshModelsContext,
@@ -1445,6 +1445,7 @@ export interface ExtensionAPI {
 	 * logged-and-continued.
 	 */
 	registerRequestGovernor(
+		// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void,
 	): void;
 
@@ -1853,7 +1854,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	/** Bound by the runner at initialize; absent pre-bind. */
 	setRequestGovernor?: (
-		governor:
+		governor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
 			| undefined,
 	) => void;
@@ -1946,7 +1947,11 @@ export interface Extension {
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Final-send request governor (last registration wins at bind). */
-	requestGovernor?: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void;
+	requestGovernor?: (
+		finalBody: unknown,
+		envelope: { transport: "websocket" | "sse"; fullBody?: unknown },
+		// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+	) => string | void;
 	/** Dispatch-fact subscriber (last registration wins at bind). */
 	dispatchListener?: (fact: DispatchFact) => void;
 }

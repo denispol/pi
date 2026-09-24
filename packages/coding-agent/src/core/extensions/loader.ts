@@ -294,7 +294,11 @@ function createExtensionAPI(
 		},
 
 		registerRequestGovernor(
-			governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void,
+			governor: (
+				finalBody: unknown,
+				envelope: { transport: "websocket" | "sse"; fullBody?: unknown },
+				// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+			) => string | void,
 		): void {
 			assertActive();
 			if (typeof governor !== "function") {
@@ -308,9 +312,7 @@ function createExtensionAPI(
 			});
 		},
 
-		registerDispatchListener(
-			listener: (fact: import("@earendil-works/pi-ai").DispatchFact) => void,
-		): void {
+		registerDispatchListener(listener: (fact: import("@earendil-works/pi-ai").DispatchFact) => void): void {
 			assertActive();
 			if (typeof listener !== "function") {
 				throw new Error(`Dispatch listener registered by extension "${extension.path}" must be a function.`);
@@ -328,9 +330,7 @@ function createExtensionAPI(
 		 * native session counters retained until acknowledged; undefined when
 		 * the runtime has no readback (pre-bind) or the session is unknown.
 		 */
-		getDispatchReadback(
-			sessionId: string,
-		): import("@earendil-works/pi-ai").DispatchReadback | undefined {
+		getDispatchReadback(sessionId: string): import("@earendil-works/pi-ai").DispatchReadback | undefined {
 			assertActive();
 			return runtime.getDispatchReadback?.(sessionId);
 		},

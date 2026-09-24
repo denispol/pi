@@ -1,6 +1,7 @@
 import type { ProviderEnv } from "../types.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { formatThrownValue } from "../utils/diagnostics.ts";
+import { assertSameAccountRefresh, deriveNamespace, noteSelectedNamespace } from "./authority.ts";
 import type {
 	ApiKeyAuth,
 	ApiKeyCredential,
@@ -12,7 +13,6 @@ import type {
 	OAuthCredential,
 	ProviderAuth,
 } from "./types.ts";
-import { deriveNamespace, noteSelectedNamespace } from "./authority.ts";
 
 export type ModelsErrorCode = "model_source" | "model_validation" | "provider" | "stream" | "auth" | "oauth";
 
@@ -152,13 +152,8 @@ async function resolveStoredOAuth(
 							AbortSignal.timeout(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS),
 						]);
 						const next = await oauth.refresh(current, refreshSignal);
-						if (
-							providerId === "openai-codex" &&
-							current.type === "oauth" &&
-							next.type === "oauth"
-						) {
+						if (providerId === "openai-codex" && current.type === "oauth" && next.type === "oauth") {
 							// C-ID: replacement disguised as refresh fails here.
-							const { assertSameAccountRefresh } = await import("./oauth/openai-codex.ts");
 							return assertSameAccountRefresh(current, next);
 						}
 						return next;
@@ -184,8 +179,7 @@ async function resolveStoredOAuth(
 
 	try {
 		const auth = await oauth.toAuth(credential);
-		const storedAccountId =
-			typeof credential.accountId === "string" ? credential.accountId : null;
+		const storedAccountId = typeof credential.accountId === "string" ? credential.accountId : null;
 		noteSelectedNamespace(providerId, deriveNamespace(auth.apiKey, storedAccountId));
 		return { auth, source: "OAuth" };
 	} catch (error) {

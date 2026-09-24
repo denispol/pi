@@ -5,13 +5,8 @@ import type {
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
-
+import { currentSelection, deriveNamespace, noteSelectedNamespace } from "../auth/authority.ts";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "../models.ts";
-import {
-	currentSelection,
-	deriveNamespace,
-	noteSelectedNamespace,
-} from "../auth/authority.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -58,7 +53,6 @@ const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const DEFAULT_MAX_RETRIES = 0;
 const BASE_DELAY_MS = 1000;
-const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 // The Codex backend accepts zstd-compressed request bodies on the SSE responses
 // endpoint (the same endpoint the official Codex client compresses against).
@@ -109,6 +103,7 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	 * A void return means a pre-identity governor: facts carry no identity
 	 * and the caller must hold uncertainty instead of committing.
 	 */
+	// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 	governRequest?: (finalBody: unknown, envelope: GovernEnvelope) => string | void;
 	/**
 	 * Dispatch observer (optional). Called once per inference-bearing send
@@ -199,6 +194,7 @@ export interface DispatchReadback {
  * a pre-identity governor whose facts carry no join (caller holds
  * uncertainty instead of committing).
  */
+// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 function captureGovernIdentity(result: string | void): string | undefined {
 	return typeof result === "string" && result.length > 0 ? result : undefined;
 }
@@ -276,7 +272,7 @@ export function isRequestDeniedError(error: unknown): boolean {
 	if (error instanceof ProviderRequestDeniedError) return true;
 	if (typeof error !== "object" || error === null) return false;
 	const record = error as Record<string, unknown>;
-	return record["name"] === "ProviderRequestDeniedError" && typeof record["code"] === "string";
+	return record.name === "ProviderRequestDeniedError" && typeof record.code === "string";
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
@@ -486,7 +482,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// send has been performed. Anything later stops uncertain.
 			// B1 evidence join: per-invocation governor echo (identity +
 			// governed-bytes hash) attached to every dispatch fact.
-			const dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = { sends: 0, effortLevel };
+			const dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = {
+				sends: 0,
+				effortLevel,
+			};
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;

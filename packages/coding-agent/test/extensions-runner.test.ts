@@ -141,7 +141,14 @@ describe("ExtensionRunner", () => {
 			runner.bindCore(extensionActions, extensionContextActions);
 			const listener = runner.getDispatchListener();
 			expect(typeof listener).toBe("function");
-			const out = listener!({ v: 1, attemptSeq: 1, transport: "sse", payloadHash: "ab", byteLength: 3, governHash: "cd" }) as unknown as {
+			const out = listener!({
+				v: 1,
+				attemptSeq: 1,
+				transport: "sse",
+				payloadHash: "ab",
+				byteLength: 3,
+				governHash: "cd",
+			}) as unknown as {
 				tag: string;
 			};
 			expect(out.tag).toBe("second");

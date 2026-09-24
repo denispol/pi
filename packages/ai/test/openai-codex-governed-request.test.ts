@@ -18,6 +18,7 @@
 //   the N/B integration slice, not this file.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DispatchFact } from "../src/api/openai-codex-responses.ts";
 import {
 	getOpenAICodexWebSocketDebugStats,
 	hashDispatchBytes,
@@ -25,7 +26,6 @@ import {
 	resetOpenAICodexWebSocketDebugStats,
 	stream as streamOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { DispatchFact } from "../src/api/openai-codex-responses.ts";
 import type { Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -355,10 +355,10 @@ describe("governed request denial", () => {
 			);
 			expect(seen.length).toBeGreaterThanOrEqual(1);
 			const first = seen[0] as Record<string, unknown>;
-			expect(first["transport"]).toBe("websocket");
-			expect(first["model"]).toBe("gpt-5.1-codex");
-			expect(first["accountId"]).toBe("acc_test");
-			expect(first["priorSends"]).toBe(0);
+			expect(first.transport).toBe("websocket");
+			expect(first.model).toBe("gpt-5.1-codex");
+			expect(first.accountId).toBe("acc_test");
+			expect(first.priorSends).toBe(0);
 		});
 
 		// R-DELTA-CUT: the native cut is the exact suffix after the recorded
@@ -686,7 +686,7 @@ describe("C-ID account authority (shared/planning#565)", () => {
 				transport: "sse",
 				fetch: fetchMock,
 				governRequest: () => {},
-				reasoningEffort: "ultra",
+				reasoningEffort: "xhigh",
 			}),
 		);
 		const errors = events.filter((e) => (e as { type?: string }).type === "error");
@@ -742,7 +742,7 @@ describe("C-ID effort linkage (shared/planning#565)", () => {
 
 describe("C-ID refresh vs replacement (shared/planning#565)", () => {
 	it("same-account rotation passes through; account change at refresh throws", async () => {
-		const { assertSameAccountRefresh } = await import("../src/auth/oauth/openai-codex.ts");
+		const { assertSameAccountRefresh } = await import("../src/auth/authority.ts");
 		const prev = { type: "oauth", access: "a", refresh: "r", expires: 1, accountId: "acc_A" } as const;
 		const same = { type: "oauth", access: "a2", refresh: "r2", expires: 2, accountId: "acc_A" } as const;
 		expect(assertSameAccountRefresh(prev, same)).toBe(same);

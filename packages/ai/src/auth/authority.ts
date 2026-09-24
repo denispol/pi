@@ -20,7 +20,7 @@
  * rather than guessed (fail-closed, documented).
  */
 
-import { createHash } from "node:crypto";
+import type { OAuthCredential } from "./types.ts";
 
 export interface SelectionRecord {
 	namespace: string;
@@ -32,7 +32,15 @@ export interface SelectionRecord {
 const registry = new Map<string, SelectionRecord & { modelId: string; providerId: string }>();
 
 function fingerprintKey(key: string): string {
-	return `keyfp:${createHash("sha256").update(key, "utf8").digest("hex").slice(0, 16)}`;
+	// globalThis.crypto.hash (sync SHA-256, Node >= 21.7) keeps this module
+	// browser-bundle-safe: no node:crypto import for bundlers to resolve, and
+	// the digest bytes are identical to createHash("sha256"). Non-conforming
+	// runtimes fail closed rather than emit a weak fingerprint.
+	const hash = (globalThis.crypto as { hash?: (alg: string, data: string, enc: string) => string } | undefined)?.hash;
+	if (typeof hash !== "function") {
+		throw new Error("crypto.hash unavailable: key fingerprinting requires Node >= 21.7");
+	}
+	return `keyfp:${hash("sha256", key, "hex").slice(0, 16)}`;
 }
 
 /**
@@ -40,10 +48,7 @@ function fingerprintKey(key: string): string {
  * credential account id (selection-time truth), then the JWT claim, then a
  * key fingerprint (replacement detection without secret exposure).
  */
-export function deriveNamespace(
-	keyMaterial: string | undefined,
-	credentialAccountId?: string | null,
-): string | null {
+export function deriveNamespace(keyMaterial: string | undefined, credentialAccountId?: string | null): string | null {
 	if (typeof credentialAccountId === "string" && credentialAccountId.length > 0) {
 		return `acct:${credentialAccountId}`;
 	}
@@ -51,7 +56,7 @@ export function deriveNamespace(
 	try {
 		const parts = keyMaterial.split(".");
 		if (parts.length === 3) {
-			const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
+			const payload = JSON.parse(atob(parts[1]));
 			const claim = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
 			if (typeof claim === "string" && claim.length > 0) return `acct:${claim}`;
 		}
@@ -96,4 +101,24 @@ export function currentSelection(providerId: string): SelectionRecord | null {
 /** Test/owner reset for one provider. Never used on the send path. */
 export function resetSelection(providerId: string): void {
 	registry.delete(providerId);
+}
+
+/**
+ * C-ID refresh-vs-replacement (F-CID-5): a refresh rotates tokens for the
+ * SAME account. If the refreshed credential names a different account, the
+ * stored credential was replaced out from under the session — refuse here
+ * rather than letting the new account masquerade as a routine rotation.
+ *
+ * Lives here (not in the oauth module) so callers in the browser-reachable
+ * graph never pull in the Node-only OAuth callback stack.
+ */
+export function assertSameAccountRefresh(previous: OAuthCredential, next: OAuthCredential): OAuthCredential {
+	const before = typeof previous.accountId === "string" ? previous.accountId : null;
+	const after = typeof next.accountId === "string" ? next.accountId : null;
+	if (before !== null && after !== null && before !== after) {
+		throw new Error(
+			`OpenAI Codex credential replaced during refresh (account changed); re-login instead of silently following the switch`,
+		);
+	}
+	return next;
 }
