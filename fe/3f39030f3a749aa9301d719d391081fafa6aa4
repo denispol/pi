@@ -1,0 +1,21 @@
+packages/ai/src/auth/oauth/openai-codex.ts
+  s_ef39a009c533ce::t_07a118766cfeea 515-534
+packages/ai/src/auth/resolve.ts
+  s_ef39a009c533ce::t_71b36d18d71183 15,154-164,186-190,204-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fe3f39030f3a749aa9301d719d391081fafa6aa4",
+  "prompts": {},
+  "sessions": {
+    "s_ef39a009c533ce": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cb2b-c1b7-7591-93e2-5d461dbc0083",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
