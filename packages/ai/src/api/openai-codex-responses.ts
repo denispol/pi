@@ -145,6 +145,14 @@ export interface GovernEnvelope {
 	 */
 	authNamespace?: string;
 	authRevision?: number;
+	/**
+	 * C-ID effort linkage: the pre-map effort level name driving this
+	 * send (options.reasoningEffort, else the clamped options.reasoning),
+	 * or null when the invocation sets neither. The caller compares it
+	 * against its authorized control/baseline; the native only guarantees
+	 * it is provider-declared (see entry check).
+	 */
+	effortLevel?: string | null;
 }
 
 /** Correlation fact for one performed-or-possible inference-bearing send. */
@@ -436,6 +444,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_AUTH", "first-request-settings");
 				}
 			}
+			// Effort level driving this send, for the caller's authorization
+			// comparison. Pre-map level name (streamSimple already maps
+			// options.reasoning into reasoningEffort), or null when the
+			// invocation sets no effort at all.
+			const effortLevel = options?.reasoningEffort ?? null;
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -473,7 +486,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// send has been performed. Anything later stops uncertain.
 			// B1 evidence join: per-invocation governor echo (identity +
 			// governed-bytes hash) attached to every dispatch fact.
-			const dispatchState: { sends: number; identity?: string; governHash?: string } = { sends: 0 };
+			const dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = { sends: 0, effortLevel };
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
@@ -577,6 +590,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					priorSends: dispatchState.sends,
 					authNamespace: currentSelection(model.provider)?.namespace,
 					authRevision: currentSelection(model.provider)?.selectionRevision,
+					effortLevel: dispatchState.effortLevel ?? null,
 				}),
 			);
 			// bodyJson is the exact SSE wire string; the caller holds the
@@ -1719,7 +1733,7 @@ async function processWebSocketStream(
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
-	dispatchState: { sends: number; identity?: string; governHash?: string } = { sends: 0 },
+	dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = { sends: 0 },
 ): Promise<void> {
 	const noteDispatch = (payload: string | Uint8Array) => {
 		dispatchState.sends += 1;
@@ -1771,6 +1785,7 @@ async function processWebSocketStream(
 			priorSends: dispatchState.sends,
 			authNamespace: currentSelection(model.provider)?.namespace,
 			authRevision: currentSelection(model.provider)?.selectionRevision,
+			effortLevel: dispatchState.effortLevel ?? null,
 		}),
 	);
 	// Governed-bytes hash over the exact object the governor authorized
