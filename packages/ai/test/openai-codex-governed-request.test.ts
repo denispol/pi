@@ -17,7 +17,7 @@
 // - Terminal-outcome correlation (completed vs failed/incomplete/late) is
 //   the N/B integration slice, not this file.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getOpenAICodexWebSocketDebugStats,
 	hashDispatchBytes,
@@ -150,7 +150,17 @@ describe("governed request denial", () => {
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(seen).toEqual([
-			["object", { transport: "sse", model: "gpt-5.1-codex", accountId: "acc_test", priorSends: 0 }],
+			[
+				"object",
+				{
+					transport: "sse",
+					model: "gpt-5.1-codex",
+					accountId: "acc_test",
+					priorSends: 0,
+					authNamespace: "acct:acc_test",
+					authRevision: 1,
+				},
+			],
 		]);
 	});
 
@@ -592,5 +602,127 @@ describe("governed request denial", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 		const errors = events.filter((e) => (e as { type?: string }).type === "error");
 		expect(errors.length).toBe(1);
+	});
+});
+
+describe("C-ID account authority (shared/planning#565)", () => {
+	beforeEach(async () => {
+		const { resetSelection } = await import("../src/auth/authority.ts");
+		resetSelection("openai-codex");
+	});
+
+	async function selectAccount(accountId: string) {
+		const { noteSelectedNamespace, deriveNamespace } = await import("../src/auth/authority.ts");
+		return noteSelectedNamespace("openai-codex", deriveNamespace(mockToken(accountId)));
+	}
+
+	it("F-CID-1: send under a non-selected account fails closed with zero sends", async () => {
+		await selectAccount("acc_selected");
+		MockWebSocket.sent = [];
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const fetchMock = vi.fn(async () => new Response("must-not-send", { status: 500 }));
+		const events = await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_other"),
+				transport: "websocket",
+				fetch: fetchMock,
+				governRequest: () => {},
+			}),
+		);
+		const errors = events.filter((e) => (e as { type?: string }).type === "error");
+		expect(errors.length).toBe(1);
+		expect(String((errors[0] as { error?: { errorMessage?: string } }).error?.errorMessage)).toMatch(
+			/account-mismatch/,
+		);
+		expect(MockWebSocket.sent.length).toBe(0);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("F-CID-2: stale selection after an account switch is denied", async () => {
+		await selectAccount("acc_A");
+		await selectAccount("acc_B"); // operator switches account
+		const fetchMock = vi.fn(async () => new Response("must-not-send", { status: 500 }));
+		const events = await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_A"),
+				transport: "sse",
+				fetch: fetchMock,
+				governRequest: () => {},
+			}),
+		);
+		const errors = events.filter((e) => (e as { type?: string }).type === "error");
+		expect(errors.length).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("F-CID-5: same-account rotation keeps working (no false denial)", async () => {
+		await selectAccount("acc_A");
+		await selectAccount("acc_A"); // refresh: same namespace, no revision bump
+		const facts: unknown[] = [];
+		MockWebSocket.sent = [];
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const events = await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_A"),
+				transport: "websocket",
+				fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+				governRequest: () => {},
+				onDispatch: (fact) => facts.push(fact),
+			}),
+		);
+		const errors = events.filter((e) => (e as { type?: string }).type === "error");
+		expect(errors.length).toBe(0);
+		expect(MockWebSocket.sent.length).toBe(1);
+		expect(facts.length).toBe(1);
+	});
+
+	it("F-CID-4: effort outside provider-declared levels is denied pre-send", async () => {
+		await selectAccount("acc_A");
+		const fetchMock = vi.fn(async () => new Response("must-not-send", { status: 500 }));
+		const events = await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_A"),
+				transport: "sse",
+				fetch: fetchMock,
+				governRequest: () => {},
+				reasoningEffort: "ultra",
+			}),
+		);
+		const errors = events.filter((e) => (e as { type?: string }).type === "error");
+		expect(errors.length).toBe(1);
+		expect(String((errors[0] as { error?: { errorMessage?: string } }).error?.errorMessage)).toMatch(
+			/first-request-settings/,
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("dispatch facts carry the account namespace and selection revision", async () => {
+		const binding = await selectAccount("acc_A");
+		const facts: Array<{ authNamespace?: string; authRevision?: number }> = [];
+		MockWebSocket.sent = [];
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		await drain(
+			streamOpenAICodexResponses(MODEL, testContext(), {
+				apiKey: mockToken("acc_A"),
+				transport: "websocket",
+				fetch: vi.fn(async () => new Response("unexpected", { status: 500 })),
+				governRequest: () => {},
+				onDispatch: (fact) => facts.push(fact),
+			}),
+		);
+		expect(facts.length).toBe(1);
+		expect(facts[0].authNamespace).toBe("acct:acc_A");
+		expect(facts[0].authRevision).toBe(binding?.selectionRevision);
+	});
+});
+
+describe("C-ID refresh vs replacement (shared/planning#565)", () => {
+	it("same-account rotation passes through; account change at refresh throws", async () => {
+		const { assertSameAccountRefresh } = await import("../src/auth/oauth/openai-codex.ts");
+		const prev = { type: "oauth", access: "a", refresh: "r", expires: 1, accountId: "acc_A" } as const;
+		const same = { type: "oauth", access: "a2", refresh: "r2", expires: 2, accountId: "acc_A" } as const;
+		expect(assertSameAccountRefresh(prev, same)).toBe(same);
+		const other = { type: "oauth", access: "a3", refresh: "r3", expires: 3, accountId: "acc_B" } as const;
+		expect(() => assertSameAccountRefresh(prev, other)).toThrow(/replaced during refresh/);
 	});
 });

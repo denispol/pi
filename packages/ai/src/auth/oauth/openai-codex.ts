@@ -512,6 +512,26 @@ async function refreshOpenAICodexToken(refreshToken: string, signal: AbortSignal
 	return credentialsFromToken(await refreshAccessToken(refreshToken, signal));
 }
 
+/**
+ * C-ID refresh-vs-replacement (F-CID-5): a refresh rotates tokens for the
+ * SAME account. If the refreshed credential names a different account, the
+ * stored credential was replaced out from under the session — refuse here
+ * rather than letting the new account masquerade as a routine rotation.
+ */
+export function assertSameAccountRefresh(
+	previous: OAuthCredential,
+	next: OAuthCredential,
+): OAuthCredential {
+	const before = typeof previous.accountId === "string" ? previous.accountId : null;
+	const after = typeof next.accountId === "string" ? next.accountId : null;
+	if (before !== null && after !== null && before !== after) {
+		throw new Error(
+			`OpenAI Codex credential replaced during refresh (account changed); re-login instead of silently following the switch`,
+		);
+	}
+	return next;
+}
+
 export const openaiCodexOAuth: OAuthAuth = {
 	name: "OpenAI (ChatGPT Plus/Pro)",
 	isSubscription: true,
