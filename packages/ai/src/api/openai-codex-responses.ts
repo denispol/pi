@@ -6,7 +6,12 @@ import type {
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 
-import { clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel, getSupportedThinkingLevels } from "../models.ts";
+import {
+	currentSelection,
+	deriveNamespace,
+	noteSelectedNamespace,
+} from "../auth/authority.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -133,6 +138,13 @@ export interface GovernEnvelope {
 	model?: string;
 	accountId?: string;
 	priorSends?: number;
+	/**
+	 * C-ID selection record (namespace + revision) current at this send,
+	 * built by the native auth owner — never from the presented body. The
+	 * caller pins it per epoch; a later divergence ends the lineage.
+	 */
+	authNamespace?: string;
+	authRevision?: number;
 }
 
 /** Correlation fact for one performed-or-possible inference-bearing send. */
@@ -155,6 +167,13 @@ export interface DispatchFact {
 	governHash: string;
 	/** Opaque caller attempt identity echoed from the governor return. */
 	identity?: string;
+	/**
+	 * C-ID selection record current at this send. Fresh per send, so a
+	 * mid-preparation account switch surfaces as an approval/send
+	 * revision split instead of silent continuation.
+	 */
+	authNamespace?: string;
+	authRevision?: number;
 }
 
 /**
@@ -383,6 +402,40 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 
 			const accountId = extractAccountId(apiKey);
+			// C-ID account authority (governed sends only): the key in use
+			// must match the selected account record. The record is
+			// established by auth resolution (the owner) or pinned on the
+			// first governed send; a mismatch means a stale cached key or
+			// an account switch under a live lineage — deny before any
+			// transport send (F-CID-1/F-CID-2). Ordinary ungoverned sends
+			// (no final-send governor, e.g. upstream multi-account socket
+			// rotation) are untouched: the authority binds governed
+			// lineages, not every process send.
+			if (options?.governRequest) {
+				const derivedNamespace = deriveNamespace(apiKey);
+				const currentSelectionRecord = currentSelection(model.provider);
+				if (
+					currentSelectionRecord !== null &&
+					derivedNamespace !== null &&
+					derivedNamespace !== currentSelectionRecord.namespace
+				) {
+					throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_AUTH", "account-mismatch");
+				}
+				if (currentSelectionRecord === null && derivedNamespace !== null) {
+					noteSelectedNamespace(model.provider, derivedNamespace, model.id);
+				}
+			}
+			// F-CID-4: first-request effort outside the provider-declared
+			// levels (resolved through the trusted model record) is denied
+			// on governed sends. Caller-authorized mid-lineage changes
+			// arrive as configuration_update controls, not as a novel
+			// effort string. Ungoverned sends keep upstream behavior.
+			if (options?.governRequest && options?.reasoningEffort !== undefined) {
+				const allowedEffort = new Set(["none", ...getSupportedThinkingLevels(model)]);
+				if (!allowedEffort.has(options.reasoningEffort)) {
+					throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_AUTH", "first-request-settings");
+				}
+			}
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -522,6 +575,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					model: body.model,
 					accountId,
 					priorSends: dispatchState.sends,
+					authNamespace: currentSelection(model.provider)?.namespace,
+					authRevision: currentSelection(model.provider)?.selectionRevision,
 				}),
 			);
 			// bodyJson is the exact SSE wire string; the caller holds the
@@ -543,6 +598,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					byteLength: bytes,
 					governHash: dispatchState.governHash ?? "",
 					...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+					authNamespace: currentSelection(model.provider)?.namespace,
+					authRevision: currentSelection(model.provider)?.selectionRevision,
 				};
 				recordSessionDispatch(cacheSessionId, fact);
 				try {
@@ -1675,6 +1732,8 @@ async function processWebSocketStream(
 			byteLength: bytes,
 			governHash: dispatchState.governHash ?? "",
 			...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+			authNamespace: currentSelection(model.provider)?.namespace,
+			authRevision: currentSelection(model.provider)?.selectionRevision,
 		};
 		recordSessionDispatch(cacheSessionId, fact);
 		// A throwing listener must never fail the send it observes.
@@ -1710,6 +1769,8 @@ async function processWebSocketStream(
 			model: fullBody.model,
 			accountId,
 			priorSends: dispatchState.sends,
+			authNamespace: currentSelection(model.provider)?.namespace,
+			authRevision: currentSelection(model.provider)?.selectionRevision,
 		}),
 	);
 	// Governed-bytes hash over the exact object the governor authorized
