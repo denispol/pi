@@ -4,8 +4,12 @@
 
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
+	type DispatchFact,
+	type DispatchReadback,
 	getCurrentSystemMessage,
+	getOpenAICodexWebSocketDebugStats,
 	type ImageContent,
+	isRequestDeniedError,
 	type Model,
 	type Provider,
 	type ProviderHeaders,
@@ -362,6 +366,10 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private requestGovernor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
+		| undefined;
+	private dispatchListener: ((fact: DispatchFact) => void) | undefined;
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -417,7 +425,15 @@ export class ExtensionRunner {
 			unregisterVirtualModel?: (provider: string, id: string) => void;
 		},
 	): void {
+		// Bind load-time governor and dispatch-listener registrations (last wins).
+		for (const ext of this.extensions) {
+			if (ext.requestGovernor) this.requestGovernor = ext.requestGovernor;
+			if (ext.dispatchListener) this.dispatchListener = ext.dispatchListener;
+		}
 		// Copy actions into the shared runtime (all extension APIs reference this)
+		this.runtime.setRequestGovernor = (governor) => this.setRequestGovernor(governor);
+		this.runtime.setDispatchListener = (listener) => this.setDispatchListener(listener);
+		this.runtime.getDispatchReadback = (sessionId) => this.getDispatchReadback(sessionId);
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -736,6 +752,43 @@ export class ExtensionRunner {
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
 		return () => this.errorListeners.delete(listener);
+	}
+
+	/** Register the final-send request governor (at most one; last wins). */
+	setRequestGovernor(
+		governor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
+			| undefined,
+	): void {
+		this.requestGovernor = governor;
+	}
+
+	getRequestGovernor(): // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+		| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
+		| undefined {
+		return this.requestGovernor;
+	}
+
+	/** Subscribe to native dispatch facts (at most one; last wins). */
+	setDispatchListener(listener: ((fact: DispatchFact) => void) | undefined): void {
+		this.dispatchListener = listener;
+	}
+
+	getDispatchListener(): ((fact: DispatchFact) => void) | undefined {
+		return this.dispatchListener;
+	}
+
+	/**
+	 * Terminal performed-send readback for one session (B1.3). Reads the
+	 * native retained counters; undefined when the session is unknown.
+	 */
+	getDispatchReadback(sessionId: string): DispatchReadback | undefined {
+		const stats = getOpenAICodexWebSocketDebugStats(sessionId);
+		if (!stats) return undefined;
+		return {
+			dispatchedRequests: stats.dispatchedRequests ?? 0,
+			...(stats.lastDispatchFact !== undefined ? { lastDispatchFact: stats.lastDispatchFact } : {}),
+		};
 	}
 
 	emitError(error: ExtensionError): void {
@@ -1365,6 +1418,10 @@ export class ExtensionRunner {
 						currentPayload = handlerResult;
 					}
 				} catch (err) {
+					// Terminal denial: a governed refusal must reach the provider
+					// layer as a typed error (no retry, no fallback), never be
+					// logged-and-continued like an ordinary handler bug.
+					if (isRequestDeniedError(err)) throw err;
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({

@@ -403,6 +403,9 @@ async function refreshOpenAICodexToken(refreshToken: string, signal: AbortSignal
 	return credentialsFromToken(await refreshAccessToken(refreshToken, signal));
 }
 
+// assertSameAccountRefresh lives in ../authority.ts: importing it from here
+// would pull this Node-only OAuth module into browser-facing bundles.
+
 export const openaiCodexOAuth: OAuthAuth = {
 	name: "OpenAI (ChatGPT Plus/Pro)",
 	isSubscription: true,

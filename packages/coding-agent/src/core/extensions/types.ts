@@ -24,6 +24,8 @@ import type {
 	AssistantMessageEventStream,
 	ClassifierApi,
 	ConstrainedSamplingConfig,
+	DispatchFact,
+	DispatchReadback,
 	ImageApi,
 	ImageContent,
 	JsonValue,
@@ -1622,6 +1624,34 @@ export interface ExtensionAPI {
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
+	/**
+	 * Register the final-send request governor (at most one; last wins).
+	 * The governor runs synchronously at the native send boundary on every
+	 * attempt; throw `ProviderRequestDeniedError` (from `@earendil-works/pi-ai`)
+	 * to deny terminally. Denial inside `before_provider_request` throws the
+	 * same error class and is rethrown by the runner instead of
+	 * logged-and-continued.
+	 */
+	registerRequestGovernor(
+		// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+		governor: (finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void,
+	): void;
+
+	/**
+	 * Subscribe to native dispatch facts (at most one; last wins). The
+	 * listener observes each performed-or-possible inference-bearing send;
+	 * it must never throw into the send path (native guards the call).
+	 */
+	registerDispatchListener(listener: (fact: DispatchFact) => void): void;
+
+	/**
+	 * Terminal performed-send readback for one session (B1.3). Returns the
+	 * native retained counters, or undefined when unavailable (pre-bind)
+	 * or the session is unknown. The required consumer reconciles
+	 * unacknowledged attempts against this before holding uncertainty.
+	 */
+	getDispatchReadback(sessionId: string): DispatchReadback | undefined;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -2124,6 +2154,19 @@ export interface ExtensionRuntimeState {
  * Provided to runner.initialize(), copied into the shared runtime.
  */
 export interface ExtensionActions {
+	/** Bound by the runner at initialize; absent pre-bind. */
+	setRequestGovernor?: (
+		governor: // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+			| ((finalBody: unknown, envelope: { transport: "websocket" | "sse"; fullBody?: unknown }) => string | void)
+			| undefined,
+	) => void;
+	/** Bound by the runner at initialize; absent pre-bind. */
+	setDispatchListener?: (listener: ((fact: DispatchFact) => void) | undefined) => void;
+	/**
+	 * Bound by the runner at initialize; absent pre-bind. Terminal
+	 * performed-send readback for one session (B1.3).
+	 */
+	getDispatchReadback?: (sessionId: string) => DispatchReadback | undefined;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
@@ -2217,6 +2260,14 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Final-send request governor (last registration wins at bind). */
+	requestGovernor?: (
+		finalBody: unknown,
+		envelope: { transport: "websocket" | "sse"; fullBody?: unknown },
+		// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+	) => string | void;
+	/** Dispatch-fact subscriber (last registration wins at bind). */
+	dispatchListener?: (fact: DispatchFact) => void;
 }
 
 /** Result of loading extensions. */

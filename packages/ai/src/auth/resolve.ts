@@ -1,6 +1,7 @@
 import type { ProviderEnv } from "../types.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { ModelsError } from "../utils/models-error.ts";
+import { assertSameAccountRefresh, deriveNamespace, noteSelectedNamespace } from "./authority.ts";
 
 export { ModelsError, type ModelsErrorCode } from "../utils/models-error.ts";
 
@@ -133,7 +134,12 @@ async function resolveStoredOAuth(
 							signal,
 							AbortSignal.timeout(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS),
 						]);
-						return await oauth.refresh(current, refreshSignal);
+						const next = await oauth.refresh(current, refreshSignal);
+						if (providerId === "openai-codex" && current.type === "oauth" && next.type === "oauth") {
+							// C-ID: replacement disguised as refresh fails here.
+							return assertSameAccountRefresh(current, next);
+						}
+						return next;
 					} catch (error) {
 						throw new ModelsError("oauth", `OAuth refresh failed for ${providerId}`, { cause: error });
 					}
@@ -155,7 +161,10 @@ async function resolveStoredOAuth(
 	}
 
 	try {
-		return { auth: await oauth.toAuth(credential), source: "OAuth" };
+		const auth = await oauth.toAuth(credential);
+		const storedAccountId = typeof credential.accountId === "string" ? credential.accountId : null;
+		noteSelectedNamespace(providerId, deriveNamespace(auth.apiKey, storedAccountId));
+		return { auth, source: "OAuth" };
 	} catch (error) {
 		throw new ModelsError("oauth", `OAuth auth derivation failed for ${providerId}`, { cause: error });
 	}
@@ -169,7 +178,9 @@ async function resolveApiKey(
 	signal: AbortSignal,
 ): Promise<AuthResult | undefined> {
 	try {
-		return await apiKey.resolve({ ctx: authContext, credential, signal });
+		const result = await apiKey.resolve({ ctx: authContext, credential, signal });
+		if (result) noteSelectedNamespace(providerId, deriveNamespace(result.auth?.apiKey));
+		return result;
 	} catch (error) {
 		throw new ModelsError("auth", `API key auth failed for provider ${providerId}`, { cause: error });
 	}

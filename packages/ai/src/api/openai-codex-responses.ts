@@ -5,8 +5,8 @@ import type {
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
-
-import { clampThinkingLevel } from "../models.ts";
+import { currentSelection, deriveNamespace, noteSelectedNamespace } from "../auth/authority.ts";
+import { clampThinkingLevel, getSupportedThinkingLevels } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -53,7 +53,6 @@ const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const DEFAULT_MAX_RETRIES = 0;
 const BASE_DELAY_MS = 1000;
-const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 // The Codex backend accepts zstd-compressed request bodies on the SSE responses
 // endpoint (the same endpoint the official Codex client compresses against).
@@ -82,6 +81,198 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
 	toolChoice?: "auto" | "none" | "required";
+	/**
+	 * Final-send governor (optional). Invoked synchronously with the exact
+	 * serialized application payload immediately before WS `socket.send()`
+	 * and before the SSE fetch, on every attempt. Throw
+	 * {@link ProviderRequestDeniedError} to terminally deny the attempt:
+	 * denial is classified non-transport, so it never enters WS retry or
+	 * SSE fallback. Absent governor = ungoverned send (no behavior change).
+	 *
+	 * On cached WebSocket continuation the sent body carries only the delta
+	 * input; `envelope.fullBody` then holds the complete pre-delta request
+	 * the delta was derived from, so governors authorize content against the
+	 * full body and verify delta linkage against it. SSE sends carry the
+	 * full body with no `fullBody` envelope entry.
+	 */
+	/**
+	 * Opaque dispatch identity the governor may return (B1 evidence join).
+	 * The caller passes its attempt id back through the governor return;
+	 * the native echoes it into the dispatch fact, joining authorization,
+	 * dispatch, and outcome to one attempt without trusting fact order.
+	 * A void return means a pre-identity governor: facts carry no identity
+	 * and the caller must hold uncertainty instead of committing.
+	 */
+	// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+	governRequest?: (finalBody: unknown, envelope: GovernEnvelope) => string | void;
+	/**
+	 * Dispatch observer (optional). Called once per inference-bearing send
+	 * that was performed or possibly performed, with a correlation fact.
+	 * It is observability, not authorization: a second fact for one stream
+	 * invocation means a second send happened and must be accounted for.
+	 * Pre-send refusals (governor denial, proven pre-send connection
+	 * failure, pre-send abort) record no fact.
+	 */
+	onDispatch?: (fact: DispatchFact) => void;
+}
+
+/**
+ * Final-send governor envelope (C2 dispatch contract).
+ *
+ * - `transport`/`fullBody`: which bytes were governed (delta vs full).
+ * - `model`/`accountId`: trusted selected-config identity, so the
+ *   governor binds authority to the chosen route instead of learning it
+ *   from the presented body (R-FIRST-SEND).
+ * - `priorSends`: inference-bearing sends already performed in this stream
+ *   invocation. Nonzero means a recovery resend, which needs a fresh
+ *   dispatch permission — never silent reuse of the first allowance.
+ */
+export interface GovernEnvelope {
+	transport: "websocket" | "sse";
+	fullBody?: unknown;
+	model?: string;
+	accountId?: string;
+	priorSends?: number;
+	/**
+	 * C-ID selection record (namespace + revision) current at this send,
+	 * built by the native auth owner — never from the presented body. The
+	 * caller pins it per epoch; a later divergence ends the lineage.
+	 */
+	authNamespace?: string;
+	authRevision?: number;
+	/**
+	 * C-ID effort linkage: the pre-map effort level name driving this
+	 * send (options.reasoningEffort, else the clamped options.reasoning),
+	 * or null when the invocation sets neither. The caller compares it
+	 * against its authorized control/baseline; the native only guarantees
+	 * it is provider-declared (see entry check).
+	 */
+	effortLevel?: string | null;
+}
+
+/** Correlation fact for one performed-or-possible inference-bearing send. */
+export interface DispatchFact {
+	/** Event representation version (B2-A1 v1). Consumers refuse unknown versions. */
+	v: 1;
+	/** 1-based send ordinal within this stream invocation. */
+	attemptSeq: number;
+	transport: "websocket" | "sse";
+	/** cyrb53 hex of the exact sent bytes; correlation-only, not security. */
+	payloadHash: string;
+	byteLength: number;
+	/**
+	 * cyrb53 hex of `JSON.stringify` of the exact object passed to the
+	 * governor for this send. The caller holds the same reference, so its
+	 * own serialization is byte-identical; equality joins the fact to the
+	 * authorized bytes (both transports; WS hashes the governed delta body,
+	 * not the framed wire bytes).
+	 */
+	governHash: string;
+	/** Opaque caller attempt identity echoed from the governor return. */
+	identity?: string;
+	/**
+	 * C-ID selection record current at this send. Fresh per send, so a
+	 * mid-preparation account switch surfaces as an approval/send
+	 * revision split instead of silent continuation.
+	 */
+	authNamespace?: string;
+	authRevision?: number;
+}
+
+/**
+ * Terminal performed-send readback for one session (B1.3): how many
+ * inference-bearing sends the native observed plus the latest fact,
+ * retained until the required consumer acknowledges it.
+ */
+export interface DispatchReadback {
+	dispatchedRequests: number;
+	lastDispatchFact?: DispatchFact;
+}
+
+/**
+ * Keep only a well-formed opaque governor identity; anything else means
+ * a pre-identity governor whose facts carry no join (caller holds
+ * uncertainty instead of committing).
+ */
+// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+function captureGovernIdentity(result: string | void): string | undefined {
+	return typeof result === "string" && result.length > 0 ? result : undefined;
+}
+
+/**
+ * Terminal performed-send readback: session-scoped count plus the latest
+ * fact, retained natively until the required consumer acknowledges it.
+ * Sessions without cache retention have no readback (documented limit).
+ */
+function recordSessionDispatch(sessionId: string | undefined, fact: DispatchFact): void {
+	if (sessionId === undefined) return;
+	const stats = getOrCreateWebSocketDebugStats(sessionId);
+	stats.dispatchedRequests += 1;
+	stats.lastDispatchFact = { ...fact };
+}
+
+/**
+ * B2-A1 v1 dispatch-bytes hash (NOT bare "cyrb53"). Versioned contract:
+ * input is UTF-8 bytes (not UTF-16 code units), two 32-bit cyrb53 lanes,
+ * lowercase hex, lane order h2h1 (16 chars). The shared vector plus the
+ * empty/Unicode/JSON fixtures in the test pin this exact representation;
+ * any change needs a new version, never a silent reinterpretation.
+ * Exported so evidence consumers (which cannot import this module, e.g.
+ * plain-JS extensions) can port it and cross-check the fixtures.
+ */
+export function hashDispatchBytes(data: string | Uint8Array): string {
+	let h1 = 0xdeadbeef;
+	let h2 = 0x41c6ce57;
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+	for (let i = 0; i < bytes.length; i++) {
+		const ch = bytes[i];
+		h1 = Math.imul(h1 ^ ch, 2654435761);
+		h2 = Math.imul(h2 ^ ch, 1597334677);
+	}
+	h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+	h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+	return `${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Provably pre-send transport failures: name resolution and connection
+ * refusal happen before any byte can transfer, so a retry is a first send,
+ * not a second. Every other throw is ambiguous (bytes may have been sent)
+ * and must stop uncertain instead of retrying.
+ */
+function isProvenPreSendThrow(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|connection refused|getaddrinfo|failed to resolve/i.test(message);
+}
+
+/**
+ * Terminal provider-request denial. A governor (or an extension, via the
+ * rethrowing `before_provider_request` runner) throws this to refuse an
+ * attempt. It is classified non-transport: no retry, no SSE fallback, no
+ * connection-limit requeue. Stable `code` values are chosen by the thrower
+ * (e.g. `ADMISSION_DENIED:<code>`); never match on message text.
+ */
+export class ProviderRequestDeniedError extends Error {
+	readonly code: string;
+
+	constructor(code: string, detail?: string) {
+		super(`Provider request denied: ${code}${detail ? `: ${detail}` : ""}`);
+		this.name = "ProviderRequestDeniedError";
+		this.code = code;
+	}
+}
+
+/**
+ * Duck-typed denial guard. Extensions run in a sandbox where
+ * `@earendil-works/pi-ai` is unresolvable, so they throw a same-shaped
+ * error (`name === "ProviderRequestDeniedError"` + string `code`); this
+ * guard accepts both the class and the shape. Never match message text.
+ */
+export function isRequestDeniedError(error: unknown): boolean {
+	if (error instanceof ProviderRequestDeniedError) return true;
+	if (typeof error !== "object" || error === null) return false;
+	const record = error as Record<string, unknown>;
+	return record.name === "ProviderRequestDeniedError" && typeof record.code === "string";
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
@@ -120,60 +311,7 @@ function assertSuccessfulOutput(output: AssistantMessage): asserts output is Suc
 // Retry Helpers
 // ============================================================================
 
-function isTerminalRateLimitError(errorText: string): boolean {
-	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
-		errorText,
-	);
-}
-
-function isRetryableError(status: number, errorText: string): boolean {
-	if (status === 429 && isTerminalRateLimitError(errorText)) {
-		return false;
-	}
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
-		return true;
-	}
-	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
-}
-
-function getRetryAfterDelayMs(headers: Headers): number | undefined {
-	const retryAfterMs = headers.get("retry-after-ms");
-	if (retryAfterMs !== null) {
-		const millis = Number(retryAfterMs);
-		if (Number.isFinite(millis)) {
-			return Math.max(0, millis);
-		}
-	}
-
-	const retryAfter = headers.get("retry-after");
-	if (!retryAfter) {
-		return undefined;
-	}
-
-	const seconds = Number(retryAfter);
-	if (Number.isFinite(seconds)) {
-		return Math.max(0, seconds * 1000);
-	}
-
-	const date = Date.parse(retryAfter);
-	if (!Number.isNaN(date)) {
-		return Math.max(0, date - Date.now());
-	}
-
-	return undefined;
-}
-
 class RetryDelayExceededError extends Error {}
-
-function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
-	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
-	if (maxRetryDelayMs > 0 && delayMs > maxRetryDelayMs) {
-		throw new RetryDelayExceededError(
-			`Server requested ${Math.ceil(delayMs / 1000)}s retry delay (max: ${Math.ceil(maxRetryDelayMs / 1000)}s)`,
-		);
-	}
-	return delayMs;
-}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
@@ -268,6 +406,45 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 
 			const accountId = extractAccountId(apiKey);
+			// C-ID account authority (governed sends only): the key in use
+			// must match the selected account record. The record is
+			// established by auth resolution (the owner) or pinned on the
+			// first governed send; a mismatch means a stale cached key or
+			// an account switch under a live lineage — deny before any
+			// transport send (F-CID-1/F-CID-2). Ordinary ungoverned sends
+			// (no final-send governor, e.g. upstream multi-account socket
+			// rotation) are untouched: the authority binds governed
+			// lineages, not every process send.
+			if (options?.governRequest) {
+				const derivedNamespace = deriveNamespace(apiKey);
+				const currentSelectionRecord = currentSelection(model.provider);
+				if (
+					currentSelectionRecord !== null &&
+					derivedNamespace !== null &&
+					derivedNamespace !== currentSelectionRecord.namespace
+				) {
+					throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_AUTH", "account-mismatch");
+				}
+				if (currentSelectionRecord === null && derivedNamespace !== null) {
+					noteSelectedNamespace(model.provider, derivedNamespace, model.id);
+				}
+			}
+			// F-CID-4: first-request effort outside the provider-declared
+			// levels (resolved through the trusted model record) is denied
+			// on governed sends. Caller-authorized mid-lineage changes
+			// arrive as configuration_update controls, not as a novel
+			// effort string. Ungoverned sends keep upstream behavior.
+			if (options?.governRequest && options?.reasoningEffort !== undefined) {
+				const allowedEffort = new Set(["none", ...getSupportedThinkingLevels(model)]);
+				if (!allowedEffort.has(options.reasoningEffort)) {
+					throw new ProviderRequestDeniedError("ADMISSION_DENIED:E_AUTH", "first-request-settings");
+				}
+			}
+			// Effort level driving this send, for the caller's authorization
+			// comparison. Pre-map level name (streamSimple already maps
+			// options.reasoning into reasoningEffort), or null when the
+			// invocation sets no effort at all.
+			const effortLevel = options?.reasoningEffort ?? null;
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -298,6 +475,17 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				recordWebSocketSseFallback(cacheSessionId);
 			}
 
+			// C2 dispatch contract: sends performed anywhere in this stream
+			// invocation (WS attempts and a later SSE fallback share it).
+			// After a possible inference-bearing send there is no automatic
+			// second send: retries and the SSE fallback run only while no
+			// send has been performed. Anything later stops uncertain.
+			// B1 evidence join: per-invocation governor echo (identity +
+			// governed-bytes hash) attached to every dispatch fact.
+			const dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = {
+				sends: 0,
+				effortLevel,
+			};
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
@@ -325,6 +513,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							accountId,
 							grammarToolInputProperties,
 							options,
+							dispatchState,
 						);
 
 						if (options?.signal?.aborted) {
@@ -340,17 +529,23 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
+						// A performed send ends automatic recovery: the server may
+						// have executed inference, so neither retry mode may run.
+						// (Server error codes like previous_response_not_found
+						// themselves prove the send executed.) The error propagates
+						// as the terminal uncertain outcome.
+						const postSend = dispatchState.sends > 0;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
+						if (!aborted && !postSend && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
 							retriedMissingWebSocketContinuation = true;
 							continue;
 						}
-						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
+						if (!aborted && !postSend && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
 							retriedWebSocketConnectionLimit = true;
 							continue;
 						}
-						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
+						if (postSend || aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
 						appendAssistantMessageDiagnostic(
@@ -382,6 +577,51 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 			const sseBody: Uint8Array | string = compressedBody ?? bodyJson;
 
+			// Final-send governor for the fallback path. Denial throws terminally:
+			// the fetch below never runs and the HTTP retry loop never starts.
+			// priorSends carries WS sends when this SSE path is a post-WS fallback:
+			// nonzero means a recovery resend needing fresh permission.
+			dispatchState.identity = captureGovernIdentity(
+				options?.governRequest?.(body, {
+					transport: "sse",
+					model: body.model,
+					accountId,
+					priorSends: dispatchState.sends,
+					authNamespace: currentSelection(model.provider)?.namespace,
+					authRevision: currentSelection(model.provider)?.selectionRevision,
+					effortLevel: dispatchState.effortLevel ?? null,
+				}),
+			);
+			// bodyJson is the exact SSE wire string; the caller holds the
+			// same body reference, so its serialization matches byte-for-byte.
+			dispatchState.governHash = hashDispatchBytes(bodyJson);
+			// Recheck cancellation after governance (same reason as the WS path).
+			if (options?.signal?.aborted) {
+				throw new Error("Request was aborted");
+			}
+			const noteSseDispatch = () => {
+				dispatchState.sends += 1;
+				const bytes =
+					typeof sseBody === "string" ? new TextEncoder().encode(sseBody).byteLength : sseBody.byteLength;
+				const fact: DispatchFact = {
+					v: 1,
+					attemptSeq: dispatchState.sends,
+					transport: "sse",
+					payloadHash: hashDispatchBytes(sseBody),
+					byteLength: bytes,
+					governHash: dispatchState.governHash ?? "",
+					...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+					authNamespace: currentSelection(model.provider)?.namespace,
+					authRevision: currentSelection(model.provider)?.selectionRevision,
+				};
+				recordSessionDispatch(cacheSessionId, fact);
+				try {
+					options?.onDispatch?.(fact);
+				} catch {
+					// Listener defects are the extension's own logs, not send failures.
+				}
+			};
+
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
 			let lastError: Error | undefined;
@@ -403,7 +643,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							body: sseBody,
 							signal: combinedSignal.signal,
 						});
+						// The fetch returned: the send was performed.
+						noteSseDispatch();
 					} catch (error) {
+						// A throw may still have executed server-side; record the
+						// possible send unless the failure is provably pre-send.
+						if (!isProvenPreSendThrow(error)) {
+							noteSseDispatch();
+						}
 						if (headerTimeoutSignal?.aborted && !options?.signal?.aborted) {
 							throw new Error(`Codex SSE response headers timed out after ${httpTimeoutMs}ms`);
 						}
@@ -421,16 +668,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					}
 
 					const errorText = await response.text();
-					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
-						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
-						const delayMs =
-							retryAfterDelayMs === undefined
-								? BASE_DELAY_MS * 2 ** attempt
-								: validateRetryDelayMs(retryAfterDelayMs, options);
-
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
+					// Any error status after a performed send is terminal: the
+					// receiver obtained the generation request (a 429 still counts
+					// a send under the contract, which counts attempts, not
+					// accepted inference). No automatic second send; recovery is
+					// a new generation with fresh permission. Only provably
+					// pre-send connection failures (catch path below) may retry.
 
 					// Parse error for friendly message on final attempt or non-retryable error
 					const fakeResponse = new Response(errorText, {
@@ -446,9 +689,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
+					// Only provably pre-send connection failures retry: anything
+					// else may have executed server-side, so it stops uncertain.
 					if (
 						attempt < maxRetries &&
+						isProvenPreSendThrow(lastError) &&
 						!(lastError instanceof RetryDelayExceededError) &&
 						!lastError.message.includes("usage limit")
 					) {
@@ -517,6 +762,10 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
+		// streamSimple rebuilds options: explicitly carry the final-send governor
+		// and the dispatch observer.
+		governRequest: (options as OpenAICodexResponsesOptions | undefined)?.governRequest,
+		onDispatch: (options as OpenAICodexResponsesOptions | undefined)?.onDispatch,
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -715,7 +964,8 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return (
 		error instanceof CodexApiError ||
 		error instanceof CodexProtocolError ||
-		error instanceof ProviderStreamEventCallbackError
+		error instanceof ProviderStreamEventCallbackError ||
+		isRequestDeniedError(error)
 	);
 }
 
@@ -905,6 +1155,10 @@ export interface OpenAICodexWebSocketDebugStats {
 	sseFallbacks: number;
 	websocketFallbackActive?: boolean;
 	lastWebSocketError?: string;
+	/** Performed-or-possible sends observed at socket.send/fetch time. */
+	dispatchedRequests: number;
+	/** Latest dispatch fact, retained until the required consumer acks. */
+	lastDispatchFact?: DispatchFact;
 }
 
 const websocketSessionCache = new Map<string, Map<string, CachedWebSocketConnection>>();
@@ -925,6 +1179,7 @@ function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocket
 			lastInputItems: 0,
 			websocketFailures: 0,
 			sseFallbacks: 0,
+			dispatchedRequests: 0,
 		};
 		websocketDebugStats.set(sessionId, stats);
 	}
@@ -1504,7 +1759,30 @@ async function processWebSocketStream(
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
+	dispatchState: { sends: number; identity?: string; governHash?: string; effortLevel?: string | null } = { sends: 0 },
 ): Promise<void> {
+	const noteDispatch = (payload: string | Uint8Array) => {
+		dispatchState.sends += 1;
+		const bytes = typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
+		const fact: DispatchFact = {
+			v: 1,
+			attemptSeq: dispatchState.sends,
+			transport: "websocket",
+			payloadHash: hashDispatchBytes(payload),
+			byteLength: bytes,
+			governHash: dispatchState.governHash ?? "",
+			...(dispatchState.identity !== undefined ? { identity: dispatchState.identity } : {}),
+			authNamespace: currentSelection(model.provider)?.namespace,
+			authRevision: currentSelection(model.provider)?.selectionRevision,
+		};
+		recordSessionDispatch(cacheSessionId, fact);
+		// A throwing listener must never fail the send it observes.
+		try {
+			options?.onDispatch?.(fact);
+		} catch {
+			// Listener defects are the extension's own logs, not send failures.
+		}
+	};
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1520,6 +1798,37 @@ async function processWebSocketStream(
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	// Final-send governor sees the exact post-delta payload plus the full
+	// pre-delta body for content authorization and delta-linkage checks.
+	// Denial throws terminally (non-transport): socket.send never runs.
+	// The return carries the caller's opaque dispatch identity into the fact.
+	try {
+		dispatchState.identity = captureGovernIdentity(
+			options?.governRequest?.(requestBody, {
+				transport: "websocket",
+				fullBody: fullBody,
+				model: fullBody.model,
+				accountId,
+				priorSends: dispatchState.sends,
+				authNamespace: currentSelection(model.provider)?.namespace,
+				authRevision: currentSelection(model.provider)?.selectionRevision,
+				effortLevel: dispatchState.effortLevel ?? null,
+			}),
+		);
+		// Governed-bytes hash over the exact object the governor authorized
+		// (the delta body on continuation, not the framed wire bytes).
+		dispatchState.governHash = hashDispatchBytes(JSON.stringify(requestBody));
+		// Recheck cancellation after governance: an abort that landed while the
+		// governor ran must not turn an allowance into a send.
+		if (options?.signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
+	} catch (error) {
+		// Nothing was sent: hand the socket back so a denial cannot leave a busy
+		// cache slot or an open socket behind. An abort closes it, as below.
+		release({ keep: !options?.signal?.aborted });
+		throw error;
+	}
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1539,7 +1848,9 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const frame = JSON.stringify({ type: "response.create", ...requestBody });
+		socket.send(frame);
+		noteDispatch(frame);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(

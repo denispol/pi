@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Provider } from "@earendil-works/pi-ai";
+import type { DispatchFact, DispatchReadback, Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
@@ -306,6 +306,48 @@ function createExtensionAPI(
 				sourceInfo: extension.sourceInfo,
 				...options,
 			});
+		},
+
+		registerRequestGovernor(
+			governor: (
+				finalBody: unknown,
+				envelope: { transport: "websocket" | "sse"; fullBody?: unknown },
+				// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
+			) => string | void,
+		): void {
+			assertActive();
+			if (typeof governor !== "function") {
+				throw new Error(`Request governor registered by extension "${extension.path}" must be a function.`);
+			}
+			// Stored on the extension record (like commands): bound by the runner
+			// at initialize, so load-time registration cannot be silently dropped.
+			applyRuntimeChange(() => {
+				extension.requestGovernor = governor;
+				runtime.setRequestGovernor?.(governor);
+			});
+		},
+
+		registerDispatchListener(listener: (fact: DispatchFact) => void): void {
+			assertActive();
+			if (typeof listener !== "function") {
+				throw new Error(`Dispatch listener registered by extension "${extension.path}" must be a function.`);
+			}
+			// Stored on the extension record (like the governor): bound by the
+			// runner at initialize, so load-time subscription cannot be dropped.
+			applyRuntimeChange(() => {
+				extension.dispatchListener = listener;
+				runtime.setDispatchListener?.(listener);
+			});
+		},
+
+		/**
+		 * Terminal performed-send readback for one session (B1.3). Reads the
+		 * native session counters retained until acknowledged; undefined when
+		 * the runtime has no readback (pre-bind) or the session is unknown.
+		 */
+		getDispatchReadback(sessionId: string): DispatchReadback | undefined {
+			assertActive();
+			return runtime.getDispatchReadback?.(sessionId);
 		},
 
 		registerShortcut(
