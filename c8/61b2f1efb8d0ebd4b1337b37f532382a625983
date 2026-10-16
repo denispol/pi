@@ -1,0 +1,24 @@
+packages/coding-agent/src/extensions/mcp/index.ts
+  s_6ae2e712a2de12::t_d7f1f089137e01 72-77,362-363,365,1136-1139
+  s_6ae2e712a2de12::t_85ac0ef6b4b038 1140-1141
+packages/coding-agent/test/suite/agent-session-mcp.test.ts
+  s_6ae2e712a2de12::t_1146ce72c56882 1039-1043,1052,1068-1114,1116-1123,1129-1130,1134
+  s_6ae2e712a2de12::t_58d01bf1b99657 1115
+  s_6ae2e712a2de12::t_f605b9cdfd175b 1124-1128,1131-1133,1135-1136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c861b2f1efb8d0ebd4b1337b37f532382a625983",
+  "prompts": {},
+  "sessions": {
+    "s_6ae2e712a2de12": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f154-72ee-7b71-9a97-e73d085ce768",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
