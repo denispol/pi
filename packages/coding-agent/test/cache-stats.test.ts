@@ -22,6 +22,7 @@ function assistant(options: {
 	cost?: Partial<typeof zeroCost>;
 	model?: string;
 	timestamp?: number;
+	stopReason?: AssistantMessage["stopReason"];
 }): AssistantMessage {
 	return {
 		role: "assistant",
@@ -37,7 +38,7 @@ function assistant(options: {
 			totalTokens: 0,
 			cost: { ...zeroCost, ...options.cost },
 		},
-		stopReason: "stop",
+		stopReason: options.stopReason ?? "stop",
 		timestamp: options.timestamp ?? 0,
 	} as AssistantMessage;
 }
@@ -104,6 +105,27 @@ describe("computeCacheWaste", () => {
 		const totals = computeCacheWaste([entry(turn1), entry(otherModel)], models);
 		expect(totals.missedTokens).toBe(100_000);
 		expect(totals.missCount).toBe(1);
+	});
+
+	it("ignores errored requests", () => {
+		// OpenRouter stream that ended with finish_reason "error": its usage reports 82,995
+		// prompt tokens for a ~119k prompt, and the request was not billed.
+		const cached = assistant({ input: 868, cacheRead: 117_888, timestamp: 0 });
+		const errored = assistant({ input: 82_995, stopReason: "error", timestamp: 14_000 });
+		const retried = assistant({ input: 119_850, timestamp: 32_000 });
+		const entries = [entry(cached), entry(errored), entry(retried)];
+
+		const totals = computeCacheWaste(entries, models);
+		expect(totals.missCount).toBe(1);
+		expect(totals.missedTokens).toBe(118_756);
+		const misses = collectCacheMisses(entries, models);
+		expect(misses.has(errored)).toBe(false);
+		expect(misses.get(retried)?.missedTokens).toBe(118_756);
+
+		expect(detectCacheMiss([entry(cached)], errored, models)).toBeUndefined();
+		const miss = detectCacheMiss([entry(cached), entry(errored)], retried, models);
+		expect(miss?.missedTokens).toBe(118_756);
+		expect(miss?.idleMs).toBe(32_000);
 	});
 
 	it("skips providers that report no cache activity", () => {
