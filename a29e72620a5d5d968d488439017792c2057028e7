@@ -1,0 +1,18 @@
+packages/coding-agent/src/core/extensions/loader.ts
+  h_0c8a37e330552f 303-308
+packages/coding-agent/src/core/extensions/runner.ts
+  h_0c8a37e330552f 413-416
+packages/coding-agent/src/core/extensions/types.ts
+  h_0c8a37e330552f 1920-1921
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a29e72620a5d5d968d488439017792c2057028e7",
+  "prompts": {},
+  "humans": {
+    "h_0c8a37e330552f": {
+      "author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
