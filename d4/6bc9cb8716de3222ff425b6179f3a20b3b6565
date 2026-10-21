@@ -1,0 +1,22 @@
+packages/coding-agent/test/cache-stats.test.ts
+  s_0968f9be67dab5::t_7289af55cf0819 25,41,110-128
+  s_0968f9be67dab5::t_5598908affdac9 129-130
+packages/coding-agent/src/core/cache-stats.ts
+  s_0968f9be67dab5::t_3cf1dc34019ce7 53-54,61,94-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d46bc9cb8716de3222ff425b6179f3a20b3b6565",
+  "prompts": {},
+  "sessions": {
+    "s_0968f9be67dab5": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a15baf-a245-77ce-ab43-ac07d43dac16",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
