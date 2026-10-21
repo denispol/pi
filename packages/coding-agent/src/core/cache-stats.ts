@@ -50,14 +50,15 @@ interface PreviousRequest {
 /**
  * Compute the cache miss for one assistant message relative to the previous
  * request. Returns undefined when nothing is counted: first turn, after a
- * reset, no cache activity ever reported (provider without cache support), or
- * miss below the noise floor.
+ * reset, errored request, no cache activity ever reported (provider without
+ * cache support), or miss below the noise floor.
  */
 function detectMiss(
 	prev: PreviousRequest | undefined,
 	message: AssistantMessage,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
+	if (message.stopReason === "error") return undefined;
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	// A zero-cache turn only counts when cache activity was reported before:
@@ -90,6 +91,10 @@ function detectMiss(
 }
 
 function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): PreviousRequest | undefined {
+	// Errored requests are not replayed, and their usage need not match the prompt
+	// (OpenRouter can report part of it for streams that end with finish_reason "error").
+	// Keep comparing against the last request that completed.
+	if (message.stopReason === "error") return undefined;
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	if (promptTokens <= 0) return undefined;
