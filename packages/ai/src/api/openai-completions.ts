@@ -35,7 +35,13 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
+import {
+	formatProviderError,
+	MAX_PROVIDER_ERROR_BODY_CHARS,
+	normalizeProviderError,
+	safeJsonStringify,
+	truncateErrorText,
+} from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -580,7 +586,10 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 
 				if (choice.finish_reason) {
 					output.rawStopReason = choice.finish_reason;
-					const finishReasonResult = mapStopReason(choice.finish_reason);
+					// OpenRouter sends a top-level `error` object next to finish_reason "error";
+					// other gateways put it on the choice.
+					const errorPayload = (chunk as { error?: unknown }).error ?? (choice as { error?: unknown }).error;
+					const finishReasonResult = mapStopReason(choice.finish_reason, errorPayload);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
 						output.errorMessage = finishReasonResult.errorMessage;
@@ -1567,7 +1576,10 @@ function parseChunkUsage(
 	return usage;
 }
 
-function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
+function mapStopReason(
+	reason: ChatCompletionChunk.Choice["finish_reason"] | string,
+	errorPayload?: unknown,
+): {
 	stopReason: StopReason;
 	errorMessage?: string;
 } {
@@ -1585,6 +1597,15 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter" };
 		case "network_error":
 			return { stopReason: "error", errorMessage: "Provider finish_reason: network_error" };
+		case "error": {
+			// Gateways such as OpenRouter end the stream this way when the upstream fails after the
+			// response started. "server error" makes the message retryable (#9002); the payload keeps
+			// the cause and still lets quota errors match the non-retryable patterns.
+			const detail = errorPayload
+				? `: ${truncateErrorText(safeJsonStringify(errorPayload), MAX_PROVIDER_ERROR_BODY_CHARS)}`
+				: "";
+			return { stopReason: "error", errorMessage: `Provider finish_reason: error (server error)${detail}` };
+		}
 		default:
 			return {
 				stopReason: "error",
