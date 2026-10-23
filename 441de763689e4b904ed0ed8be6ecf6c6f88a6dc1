@@ -1,0 +1,33 @@
+packages/ai/src/api/openai-codex-responses.ts
+  s_f49c762617e67d::t_677463acd72f34 85-110,411-414,731-735,1531-1533
+packages/ai/src/index.ts
+  s_1cc0f7c412d1a8::t_55bdee71a3e13b 18
+packages/ai/src/models.ts
+  s_1cc0f7c412d1a8::t_48ebc3f80431ed 83-89
+packages/coding-agent/src/core/sdk.ts
+  s_f49c762617e67d::t_462fa4cc26af0f 319,322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "441de763689e4b904ed0ed8be6ecf6c6f88a6dc1",
+  "prompts": {},
+  "sessions": {
+    "s_1cc0f7c412d1a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3fccf89c-029c-4fcd-b942-51ad16d5ca70",
+        "model": "claude-opus-5"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    },
+    "s_f49c762617e67d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3106c61-f391-44ab-a48f-094656d89f25",
+        "model": "claude-opus-5"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+packages/ai/test/openai-codex-governed-request.test.ts
+  s_ef39a009c533ce::t_481314369d94ea 162,720-742
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0136097e352f5e6d75433e71c20388cf00c65d9c",
+  "prompts": {},
+  "sessions": {
+    "s_ef39a009c533ce": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cb2b-c1b7-7591-93e2-5d461dbc0083",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "denispol <19826856+denispol@users.noreply.github.com>"
+    }
+  }
+}
