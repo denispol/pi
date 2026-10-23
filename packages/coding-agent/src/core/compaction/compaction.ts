@@ -630,10 +630,30 @@ export async function completeSummarization(
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
-			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+	// Summaries have no socket-cache affinity; keep post-start auto fallback local to this retry loop.
+	let useSse = false;
+	const produce = async (): Promise<AssistantMessage> => {
+		const attemptOptions: SimpleStreamOptions = {
+			...requestOptions,
+			transport: useSse ? "sse" : requestOptions.transport,
+		};
+		const response = streamFn
+			? await (await streamFn(model, context, attemptOptions)).result()
+			: await completeSimple(model, context, attemptOptions);
+		if (
+			response.stopReason === "error" &&
+			response.api === "openai-codex-responses" &&
+			response.diagnostics?.some(
+				(diagnostic) =>
+					diagnostic.type === "provider_transport_failure" &&
+					diagnostic.details?.configuredTransport === "auto" &&
+					diagnostic.details?.eventsEmitted === true,
+			)
+		) {
+			useSse = true;
+		}
+		return response;
+	};
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 

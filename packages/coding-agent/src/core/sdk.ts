@@ -344,6 +344,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const headerRunner = extensionRunnerRef.current;
 		return {
 			...options,
+			transport: options.transport ?? agent.transport,
 			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,

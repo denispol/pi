@@ -10,7 +10,9 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { completeSummarization } from "../src/core/compaction/compaction.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -85,6 +87,7 @@ describe("createAgentSession stream options", () => {
 		requestOptions: SimpleStreamOptions = {},
 		extensionFactory?: ExtensionFactory,
 		providerEvent?: unknown,
+		runRequest?: (session: AgentSession) => Promise<unknown>,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -130,7 +133,9 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			if (providerEvent === undefined) {
+			if (runRequest) {
+				await runRequest(session);
+			} else if (providerEvent === undefined) {
 				const stream = await session.agent.streamFunction(
 					model,
 					normalizeContext({ messages: [] }),
@@ -219,6 +224,49 @@ describe("createAgentSession stream options", () => {
 		} finally {
 			fixture.dispose();
 		}
+	});
+
+	// #10781: summaries bypass the agent loop's usual transport option assembly.
+	it.each([
+		{ configured: "sse", changed: undefined, explicit: undefined, expected: "sse" },
+		{ configured: "auto", changed: undefined, explicit: undefined, expected: "auto" },
+		{ configured: "sse", changed: undefined, explicit: "websocket-cached", expected: "websocket-cached" },
+		{ configured: "auto", changed: "sse", explicit: undefined, expected: "sse" },
+		{ configured: "auto", changed: "websocket", explicit: "sse", expected: "sse" },
+	] as const)(
+		"routes summaries through the current Agent transport: %j",
+		async ({ configured, changed, explicit, expected }) => {
+			const options = await captureStreamOptions(
+				"openai-codex-responses",
+				{ transport: configured },
+				{},
+				undefined,
+				undefined,
+				async (session) => {
+					if (changed) session.agent.transport = changed;
+					await completeSummarization(
+						createModel("openai-codex-responses"),
+						normalizeContext({ messages: [] }),
+						{
+							apiKey: "test-api-key",
+							transport: explicit,
+						},
+						session.agent.streamFunction,
+					);
+				},
+			);
+			expect(options?.transport).toBe(expected);
+			expect(options?.cacheRetention).toBe("none");
+		},
+	);
+
+	it("preserves an ordinary request's explicit transport", async () => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ transport: "sse" },
+			{ transport: "websocket-cached" },
+		);
+		expect(options?.transport).toBe("websocket-cached");
 	});
 
 	it("forwards httpIdleTimeoutMs as timeoutMs for OpenAI Codex", async () => {
