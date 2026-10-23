@@ -1081,7 +1081,7 @@ function closeWebSocketSilently(socket: WebSocketLike, code = 1000, reason = "do
 	} catch {}
 }
 
-function scheduleSessionWebSocketExpiry(sessionId: string, accountId: string, entry: CachedWebSocketConnection): void {
+function scheduleSessionWebSocketExpiry(sessionId: string, cacheKey: string, entry: CachedWebSocketConnection): void {
 	if (entry.idleTimer) {
 		clearTimeout(entry.idleTimer);
 	}
@@ -1089,7 +1089,7 @@ function scheduleSessionWebSocketExpiry(sessionId: string, accountId: string, en
 		if (entry.busy) return;
 		closeWebSocketSilently(entry.socket, 1000, "idle_timeout");
 		const accountEntries = websocketSessionCache.get(sessionId);
-		if (accountEntries?.get(accountId) === entry) accountEntries.delete(accountId);
+		if (accountEntries?.get(cacheKey) === entry) accountEntries.delete(cacheKey);
 		if (accountEntries?.size === 0) websocketSessionCache.delete(sessionId);
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
@@ -1195,8 +1195,9 @@ async function acquireWebSocket(
 		};
 	}
 
+	const cacheKey = JSON.stringify([url, accountId]);
 	let accountEntries = websocketSessionCache.get(sessionId);
-	const cached = accountEntries?.get(accountId);
+	const cached = accountEntries?.get(cacheKey);
 	if (cached) {
 		if (cached.idleTimer) {
 			clearTimeout(cached.idleTimer);
@@ -1204,7 +1205,7 @@ async function acquireWebSocket(
 		}
 		if (!cached.busy && isWebSocketSessionExpired(cached)) {
 			closeWebSocketSilently(cached.socket, 1000, "connection_age_limit");
-			accountEntries?.delete(accountId);
+			accountEntries?.delete(cacheKey);
 			if (accountEntries?.size === 0) websocketSessionCache.delete(sessionId);
 		} else if (!cached.busy && isWebSocketReusable(cached.socket)) {
 			cached.busy = true;
@@ -1216,12 +1217,12 @@ async function acquireWebSocket(
 					if (!keep || !isWebSocketReusable(cached.socket)) {
 						closeWebSocketSilently(cached.socket);
 						const currentEntries = websocketSessionCache.get(sessionId);
-						if (currentEntries?.get(accountId) === cached) currentEntries.delete(accountId);
+						if (currentEntries?.get(cacheKey) === cached) currentEntries.delete(cacheKey);
 						if (currentEntries?.size === 0) websocketSessionCache.delete(sessionId);
 						return;
 					}
 					cached.busy = false;
-					scheduleSessionWebSocketExpiry(sessionId, accountId, cached);
+					scheduleSessionWebSocketExpiry(sessionId, cacheKey, cached);
 				},
 			};
 		}
@@ -1237,7 +1238,7 @@ async function acquireWebSocket(
 		}
 		if (!isWebSocketReusable(cached.socket)) {
 			closeWebSocketSilently(cached.socket);
-			accountEntries?.delete(accountId);
+			accountEntries?.delete(cacheKey);
 			if (accountEntries?.size === 0) websocketSessionCache.delete(sessionId);
 		}
 	}
@@ -1249,7 +1250,7 @@ async function acquireWebSocket(
 		accountEntries = new Map();
 		websocketSessionCache.set(sessionId, accountEntries);
 	}
-	accountEntries.set(accountId, entry);
+	accountEntries.set(cacheKey, entry);
 	return {
 		socket,
 		entry,
@@ -1259,12 +1260,12 @@ async function acquireWebSocket(
 				closeWebSocketSilently(entry.socket);
 				if (entry.idleTimer) clearTimeout(entry.idleTimer);
 				const currentEntries = websocketSessionCache.get(sessionId);
-				if (currentEntries?.get(accountId) === entry) currentEntries.delete(accountId);
+				if (currentEntries?.get(cacheKey) === entry) currentEntries.delete(cacheKey);
 				if (currentEntries?.size === 0) websocketSessionCache.delete(sessionId);
 				return;
 			}
 			entry.busy = false;
-			scheduleSessionWebSocketExpiry(sessionId, accountId, entry);
+			scheduleSessionWebSocketExpiry(sessionId, cacheKey, entry);
 		},
 	};
 }
